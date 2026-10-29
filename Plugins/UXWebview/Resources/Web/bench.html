@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>UXWebview Benchmark</title>
+<style>
+	html, body { margin: 0; height: 100%; background: #0b0e14; color: #e6e9ef;
+		font-family: system-ui, sans-serif; overflow-x: hidden; }
+	#stage { position: absolute; inset: 0; overflow: hidden; }
+	#box { position: absolute; top: 80px; left: 0; width: 160px; height: 160px;
+		border-radius: 12px; background: linear-gradient(135deg, #4f8cff, #9b5cff); }
+	#panel { position: absolute; right: 40px; top: 60px; width: 320px; padding: 16px;
+		background: #151a24; border: 1px solid #2a3140; border-radius: 10px; }
+	#static-text { position: absolute; left: 40px; top: 320px; width: 520px;
+		font-size: 14px; line-height: 1.6; color: #8b93a7; }
+	#scroller { position: absolute; left: 40px; top: 420px; width: 520px; height: 200px;
+		overflow-y: auto; background: #10141c; border: 1px solid #232a38; border-radius: 10px; }
+	#scroller div { padding: 10px 14px; border-bottom: 1px solid #1b2230; font-size: 13px; }
+	#fps { font-variant-numeric: tabular-nums; font-size: 28px; }
+</style>
+</head>
+<body>
+<div id="stage">
+	<canvas id="canvas" width="1920" height="300" style="position:absolute;bottom:0;left:0;"></canvas>
+	<div id="box"></div>
+	<div id="panel">
+		<div id="fps">0.0</div>
+		<div>fps (requestAnimationFrame)</div>
+	</div>
+	<div id="static-text">
+		Static region. This block never changes so a correct pipeline copies no
+		frames while nothing else moves (open with ?mode=static).
+	</div>
+	<div id="scroller"></div>
+</div>
+<script>
+	const params = new URLSearchParams(location.search);
+	const staticMode = params.get('mode') === 'static';
+
+	const box = document.getElementById('box');
+	const fpsLabel = document.getElementById('fps');
+	const canvas = document.getElementById('canvas');
+	const ctx = canvas.getContext('2d');
+	const scroller = document.getElementById('scroller');
+	for (let i = 0; i < 60; i++) {
+		const row = document.createElement('div');
+		row.textContent = 'Row ' + (i + 1);
+		scroller.appendChild(row);
+	}
+
+	let frames = 0;
+	let lastFpsTime = performance.now();
+	let lastScroll = 0;
+
+	function animate(now) {
+		if (!staticMode) {
+			const t = now / 1000;
+			box.style.transform = 'translateX(' + (Math.sin(t) * 0.5 + 0.5) * (window.innerWidth - 200) + 'px)';
+
+			ctx.clearRect(0, 0, canvas.width, canvas.height);
+			for (let i = 0; i < 40; i++) {
+				const x = ((t * 120 + i * 48) % (canvas.width + 100)) - 100;
+				ctx.fillStyle = 'hsl(' + (i * 9) + ',70%,55%)';
+				ctx.fillRect(x, 120 + Math.sin(t * 2 + i) * 60, 40, 40);
+			}
+
+			if (now - lastScroll > 16) {
+				lastScroll = now;
+				scroller.scrollTop = scroller.scrollTop + 2 >= scroller.scrollHeight - scroller.clientHeight
+					? 0 : scroller.scrollTop + 2;
+			}
+		}
+
+		frames++;
+		if (now - lastFpsTime >= 1000) {
+			fpsLabel.textContent = (frames * 1000 / (now - lastFpsTime)).toFixed(1);
+			frames = 0;
+			lastFpsTime = now;
+		}
+		requestAnimationFrame(animate);
+	}
+	requestAnimationFrame(animate);
+</script>
+</body>
+</html>
