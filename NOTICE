@@ -1,0 +1,22 @@
+UXWebview
+Copyright (c) 2026 UXWebview contributors
+Licensed under the MIT License (see LICENSE).
+
+Third-party components:
+
+Chromium Embedded Framework (CEF)
+  License: BSD-3-Clause
+  Usage: browser engine in the native host process
+  Redistributed unmodified with its own LICENSE and CREDITS files.
+
+yyjson
+  License: MIT
+  Usage: JSON parsing in the native host process
+
+Catch2
+  License: BSL-1.0
+  Usage: unit tests of the native host (not redistributed)
+
+Microsoft WebView2 SDK (optional provider)
+  License: Microsoft terms of use
+  Usage: Windows WebView2 provider, downloaded separately

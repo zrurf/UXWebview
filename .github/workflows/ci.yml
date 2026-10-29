@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  descriptor-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse plugin and project descriptors
+        run: |
+          python3 -c "
+          import json, pathlib
+          for path in ['UXWebview.uplugin', 'Samples/UXWebviewSample/UXWebviewSample.uproject']:
+              json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
+              print(path, 'ok')
+          "
+
+  host-build:
+    if: ${{ hashFiles('native/host/CMakeLists.txt') != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, macos-latest, ubuntu-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S native/host -B native/build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build native/build --config Release
+      - name: Test
+        run: ctest --test-dir native/build -C Release --output-on-failure

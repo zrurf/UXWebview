@@ -1,0 +1,27 @@
+# Design documents are local-only and must not be committed.
+dev-note/
+
+# Unreal Engine generated content
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+Build/
+*.sln
+*.suo
+*.VC.db
+*.opensdf
+*.sdf
+*.xcodeproj
+*.xcworkspace
+
+# Native host build output and downloaded CEF binaries
+native/cef/
+native/build/
+native/out/
+
+# Tooling artifacts
+.screenshots/
+.vs/
+.idea/
+.vscode/

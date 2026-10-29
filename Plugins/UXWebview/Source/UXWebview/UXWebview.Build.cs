@@ -1,0 +1,25 @@
+using UnrealBuildTool;
+
+public class UXWebview : ModuleRules
+{
+	public UXWebview(ReadOnlyTargetRules Target) : base(Target)
+	{
+		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+
+		PublicDependencyModuleNames.AddRange(new string[]
+		{
+			"Core",
+			"CoreUObject",
+			"Engine",
+			"Json",
+			"RenderCore",
+			"RHI"
+		});
+
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			"DeveloperSettings",
+			"Projects"
+		});
+	}
+}
