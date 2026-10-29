@@ -10,7 +10,10 @@ public class UXWebviewSample : ModuleRules
 		{
 			"Core",
 			"CoreUObject",
-			"Engine"
+			"Engine",
+			"UXWebview",
+			"Slate",
+			"SlateCore"
 		});
 	}
 }

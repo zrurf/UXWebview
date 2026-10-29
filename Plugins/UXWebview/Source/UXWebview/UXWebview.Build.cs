@@ -11,6 +11,7 @@ public class UXWebview : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"DeveloperSettings",
 			"Json",
 			"RenderCore",
 			"RHI"
@@ -18,7 +19,6 @@ public class UXWebview : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"DeveloperSettings",
 			"Projects"
 		});
 	}

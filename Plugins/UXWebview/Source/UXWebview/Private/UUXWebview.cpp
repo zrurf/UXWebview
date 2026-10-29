@@ -1,0 +1,299 @@
+#include "UUXWebview.h"
+
+#include "Engine/Texture2D.h"
+#include "Provider/UXWebviewProviderRegistry.h"
+#include "UXWebviewLog.h"
+
+FUXWebviewResult UUXWebview::Initialize(const FUXWebviewCreateParams& Params)
+{
+	if (State != EUXWebviewState::Created)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidState,
+			TEXT("webview has already been initialized"));
+	}
+	if (Params.ViewportSize.X <= 0 || Params.ViewportSize.Y <= 0)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidArgs,
+			TEXT("viewport size must be positive"));
+	}
+
+	FUXWebviewProviderRegistry& Registry = FUXWebviewProviderRegistry::Get();
+
+	FString ResolvedName;
+	const FUXWebviewResult ResolveResult = Registry.Resolve(Params, ResolvedName);
+	if (!ResolveResult.bSuccess)
+	{
+		State = EUXWebviewState::Destroyed;
+		UE_LOG(LogUXWebview, Warning, TEXT("provider resolution failed: %s"), *ResolveResult.Message);
+		return ResolveResult;
+	}
+
+	const FUXWebviewResult CreateResult = Registry.CreateProvider(ResolvedName, Provider);
+	if (!CreateResult.bSuccess)
+	{
+		State = EUXWebviewState::Destroyed;
+		UE_LOG(LogUXWebview, Warning, TEXT("provider creation failed: %s"), *CreateResult.Message);
+		return CreateResult;
+	}
+
+	ProviderName = ResolvedName;
+	Capabilities = Provider->GetCapabilities();
+	State = EUXWebviewState::Initializing;
+
+	FUXWebviewInitParams InitParams;
+	InitParams.ViewportSize = Params.ViewportSize;
+	InitParams.DpiScale = Params.DpiScale;
+	InitParams.TargetFrameRate = Params.TargetFrameRate;
+	InitParams.bTransparent = Params.bTransparent;
+	InitParams.bOverlay = Params.DisplayMode == EUXWebviewDisplayMode::Overlay;
+	InitParams.InitialUrl = Params.InitialUrl;
+
+	const FUXWebviewResult InitResult = Provider->Initialize(InitParams, this);
+	if (!InitResult.bSuccess)
+	{
+		UE_LOG(LogUXWebview, Warning, TEXT("provider '%s' failed to initialize: %s"),
+			*ResolvedName, *InitResult.Message);
+		ShutdownProvider();
+		State = EUXWebviewState::Destroyed;
+		return InitResult;
+	}
+
+	// Providers may report readiness synchronously; keep Initializing otherwise.
+	if (State == EUXWebviewState::Initializing)
+	{
+		State = EUXWebviewState::Ready;
+	}
+	UE_LOG(LogUXWebview, Log, TEXT("webview initialized with provider '%s'"), *ProviderName);
+	return FUXWebviewResult::Ok();
+}
+
+void UUXWebview::Destroy()
+{
+	if (State == EUXWebviewState::Destroyed)
+	{
+		return;
+	}
+	ShutdownProvider();
+	CachedTexture = nullptr;
+	State = EUXWebviewState::Destroyed;
+}
+
+void UUXWebview::ShutdownProvider()
+{
+	if (Provider)
+	{
+		Provider->Shutdown();
+		Provider.Reset();
+	}
+}
+
+void UUXWebview::BeginDestroy()
+{
+	ShutdownProvider();
+	Super::BeginDestroy();
+}
+
+FUXWebviewResult UUXWebview::GuardAlive() const
+{
+	if (State == EUXWebviewState::Destroyed || !Provider)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidState,
+			TEXT("webview is destroyed"));
+	}
+	return FUXWebviewResult::Ok();
+}
+
+FUXWebviewResult UUXWebview::GuardReady() const
+{
+	const FUXWebviewResult Alive = GuardAlive();
+	if (!Alive.bSuccess)
+	{
+		return Alive;
+	}
+	if (State != EUXWebviewState::Ready && State != EUXWebviewState::Navigating)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady,
+			TEXT("webview is not ready"));
+	}
+	return FUXWebviewResult::Ok();
+}
+
+UTexture2D* UUXWebview::GetTexture() const
+{
+	if (State == EUXWebviewState::Destroyed || !Provider)
+	{
+		return nullptr;
+	}
+	return CachedTexture ? CachedTexture.Get() : Provider->GetTexture();
+}
+
+FUXWebviewResult UUXWebview::LoadURL(const FString& Url)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		return Ready;
+	}
+	State = EUXWebviewState::Navigating;
+	return Provider->LoadURL(Url);
+}
+
+FUXWebviewResult UUXWebview::LoadHTML(const FString& Html, const FString& BaseUrl)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		return Ready;
+	}
+	State = EUXWebviewState::Navigating;
+	return Provider->LoadHTML(Html, BaseUrl);
+}
+
+FUXWebviewResult UUXWebview::Reload()
+{
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		return Ready;
+	}
+	State = EUXWebviewState::Navigating;
+	return Provider->Reload();
+}
+
+FUXWebviewResult UUXWebview::StopLoading()
+{
+	const FUXWebviewResult Ready = GuardReady();
+	return Ready.bSuccess ? Provider->StopLoading() : Ready;
+}
+
+FUXWebviewResult UUXWebview::SetViewport(const FIntPoint& Size, float DpiScale)
+{
+	const FUXWebviewResult Alive = GuardAlive();
+	if (!Alive.bSuccess)
+	{
+		return Alive;
+	}
+	if (Size.X <= 0 || Size.Y <= 0)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidArgs,
+			TEXT("viewport size must be positive"));
+	}
+	return Provider->SetViewport(Size, DpiScale);
+}
+
+FUXWebviewResult UUXWebview::SetVisible(bool bVisible)
+{
+	const FUXWebviewResult Alive = GuardAlive();
+	if (!Alive.bSuccess)
+	{
+		return Alive;
+	}
+	State = bVisible ? EUXWebviewState::Ready : EUXWebviewState::Suspended;
+	return Provider->SetVisible(bVisible);
+}
+
+FUXWebviewResult UUXWebview::SetFrameRate(int32 FramesPerSecond)
+{
+	const FUXWebviewResult Alive = GuardAlive();
+	return Alive.bSuccess ? Provider->SetFrameRate(FramesPerSecond) : Alive;
+}
+
+FUXWebviewResult UUXWebview::SetZoom(float ZoomFactor)
+{
+	const FUXWebviewResult Alive = GuardAlive();
+	return Alive.bSuccess ? Provider->SetZoom(ZoomFactor) : Alive;
+}
+
+FUXWebviewResult UUXWebview::SetUserAgent(const FString& UserAgent)
+{
+	const FUXWebviewResult Alive = GuardAlive();
+	return Alive.bSuccess ? Provider->SetUserAgent(UserAgent) : Alive;
+}
+
+FUXWebviewResult UUXWebview::ExecuteScript(const FString& Script, FUXWebviewScriptCallback OnResult)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	return Ready.bSuccess ? Provider->ExecuteScript(Script, MoveTemp(OnResult)) : Ready;
+}
+
+FUXWebviewResult UUXWebview::EmitToWeb(const FString& EventName, const FString& PayloadJson)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	return Ready.bSuccess ? Provider->EmitToWeb(EventName, PayloadJson) : Ready;
+}
+
+FUXWebviewResult UUXWebview::SendInput(const FUXWebviewInputEvent& Event)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	return Ready.bSuccess ? Provider->SendInput(Event) : Ready;
+}
+
+FUXWebviewResult UUXWebview::SetFocus(bool bFocused)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	return Ready.bSuccess ? Provider->SetFocus(bFocused) : Ready;
+}
+
+FUXWebviewResult UUXWebview::RequestFrame()
+{
+	const FUXWebviewResult Ready = GuardReady();
+	return Ready.bSuccess ? Provider->RequestFrame() : Ready;
+}
+
+FUXWebviewResult UUXWebview::OpenDevTools()
+{
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		return Ready;
+	}
+	if (!Capabilities.bDevTools)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotSupported,
+			TEXT("provider does not support devtools"));
+	}
+	return Provider->OpenDevTools();
+}
+
+void UUXWebview::OnViewReady()
+{
+	if (State == EUXWebviewState::Destroyed)
+	{
+		return;
+	}
+	State = EUXWebviewState::Ready;
+	OnReady.Broadcast();
+}
+
+void UUXWebview::OnViewLoadCompleted(const FString& Url)
+{
+	if (State == EUXWebviewState::Destroyed)
+	{
+		return;
+	}
+	State = EUXWebviewState::Ready;
+	OnLoadCompleted.Broadcast(Url);
+}
+
+void UUXWebview::OnViewFrame(int32 Width, int32 Height)
+{
+	if (State == EUXWebviewState::Destroyed || !Provider)
+	{
+		return;
+	}
+	FrameWidth = Width;
+	FrameHeight = Height;
+	++FrameCount;
+	CachedTexture = Provider->GetTexture();
+}
+
+void UUXWebview::OnViewCrash(const FString& Reason)
+{
+	if (State == EUXWebviewState::Destroyed)
+	{
+		return;
+	}
+	State = EUXWebviewState::Crashed;
+	UE_LOG(LogUXWebview, Warning, TEXT("provider '%s' crashed: %s"), *ProviderName, *Reason);
+	OnCrashed.Broadcast(Reason);
+}
