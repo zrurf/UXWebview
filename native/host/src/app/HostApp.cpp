@@ -53,7 +53,7 @@ HostApp::~HostApp()
 
 bool HostApp::StartInfrastructure()
 {
-	if (!Publisher.Start(Options.SharedMemoryName))
+	if (!Publisher.Start(Options.SharedMemoryName, Options.AdapterLuid, Options.OwnerPid))
 	{
 		return false;
 	}

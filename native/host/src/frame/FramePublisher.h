@@ -18,8 +18,9 @@ public:
 	FramePublisher(const FramePublisher&) = delete;
 	FramePublisher& operator=(const FramePublisher&) = delete;
 
-	// Creates the shared memory section. Returns false on failure.
-	bool Start(const std::string& sharedMemoryName);
+	// Creates the shared memory section. AdapterLuid selects the GPU that the
+	// game process uses; OwnerPid receives duplicated texture handles.
+	bool Start(const std::string& sharedMemoryName, uint64_t adapterLuid, uint32_t ownerPid);
 	void Stop();
 
 	// Called from the CEF UI thread with a D3D11 NT handle that is only valid

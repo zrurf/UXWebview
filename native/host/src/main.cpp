@@ -72,6 +72,15 @@ int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 		{
 			options.Level = static_cast<uxwv::LogLevel>(atoi(nextValue("--log-level").c_str()));
 		}
+		else if (arg == "--luid")
+		{
+			const std::string value = nextValue("--luid");
+			options.AdapterLuid = strtoull(value.c_str(), nullptr, 0);
+		}
+		else if (arg == "--owner-pid")
+		{
+			options.OwnerPid = static_cast<uint32_t>(strtoul(nextValue("--owner-pid").c_str(), nullptr, 10));
+		}
 		else if (arg == "--no-sandbox")
 		{
 			options.bNoSandbox = true;

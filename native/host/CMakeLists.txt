@@ -65,6 +65,7 @@ target_link_libraries(UXWebviewHost PRIVATE
 	libcef_lib
 	libcef_dll_wrapper
 	d3d11
+	d3d12
 	dxgi
 )
 

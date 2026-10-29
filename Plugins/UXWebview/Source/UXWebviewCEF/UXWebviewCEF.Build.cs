@@ -1,4 +1,5 @@
 using UnrealBuildTool;
+using System.IO;
 
 public class UXWebviewCEF : ModuleRules
 {
@@ -19,7 +20,21 @@ public class UXWebviewCEF : ModuleRules
 		{
 			"Json",
 			"RenderCore",
-			"RHI"
+			"RHI",
+			"Slate",
+			"SlateCore"
 		});
+
+		// Shared frame/IPC headers live outside the plugin so the host can use them too.
+		PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "..", "..", "..", "..", "native", "include"));
+
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[]
+			{
+				"D3D12RHI",
+				"D3D11RHI"
+			});
+		}
 	}
 }
