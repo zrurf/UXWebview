@@ -25,3 +25,6 @@ native/out/
 .vs/
 .idea/
 .vscode/
+
+# Config materialized by the editor on first launch
+Samples/*/Config/DefaultInput.ini
