@@ -36,7 +36,7 @@ typedef enum UxIpcType
     UXWV_IPC_STOP           = 9,
 
     /* Instance properties. */
-    UXWV_IPC_RESIZE         = 10, /* A = width, B = height */
+    UXWV_IPC_RESIZE         = 10, /* A = width px, B = height px, payload {"scale": float} */
     UXWV_IPC_SET_VISIBLE    = 11, /* A = 0/1 */
     UXWV_IPC_SET_FRAME_RATE = 12, /* A = frames per second, 0 disables begin frame */
     UXWV_IPC_FOCUS          = 13, /* A = 0/1 */

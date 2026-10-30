@@ -25,7 +25,7 @@ public:
 	~BrowserManager();
 
 	bool Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
-		const std::string& url, int frameRate, bool visible);
+		const std::string& url, int frameRate, bool visible, float deviceScale = 1.0f);
 	void Destroy(uint32_t id);
 	void ShutdownAll();
 
@@ -37,7 +37,7 @@ public:
 	void Reload(uint32_t id);
 	void StopLoading(uint32_t id);
 
-	void Resize(uint32_t id, int width, int height);
+	void Resize(uint32_t id, int width, int height, float deviceScale);
 	void SetVisible(uint32_t id, bool visible);
 	void SetFrameRate(uint32_t id, int frameRate);
 	void Focus(uint32_t id, bool focused);

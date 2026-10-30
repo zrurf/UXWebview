@@ -90,19 +90,21 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 		return;
 	}
 
-	const float Dpi = Args.Num() > 0 ? FMath::Clamp(FCString::Atof(*Args[0]), 0.5f, 4.0f) : 1.0f;
+	// Zero means the widget follows the layout scale, which is what a shipped UI wants.
+	const float Dpi = Args.Num() > 0 ? FMath::Clamp(FCString::Atof(*Args[0]), 0.0f, 4.0f) : 0.0f;
 	const float Seconds = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.0f;
 	const FString Provider = Args.Num() > 2 && !Args[2].IsEmpty() ? Args[2] : FString(TEXT("Null"));
 	const FString Url = Args.Num() > 3 ? Args[3] : FString();
 	const int32 FrameRate = Args.Num() > 4 ? FCString::Atoi(*Args[4]) : 30;
 	const int32 Width = 512;
 	const int32 Height = 288;
+	const float BoxScale = Dpi > 0.0f ? Dpi : 1.0f;
 
 	FUXWebviewCreateParams Params;
 	Params.ProviderName = Provider;
 	Params.ViewportSize = FIntPoint(
-		FMath::RoundToInt(Width * Dpi),
-		FMath::RoundToInt(Height * Dpi));
+		FMath::RoundToInt(Width * BoxScale),
+		FMath::RoundToInt(Height * BoxScale));
 	Params.DpiScale = Dpi;
 	Params.TargetFrameRate = FrameRate;
 	Params.InitialUrl = Url;
@@ -143,7 +145,7 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 
 	const FString UrlDisplay = Url.IsEmpty() ? FString(TEXT("(default)")) : Url;
 	UE_LOG(LogUXWebviewWidgetDemo, Log,
-		TEXT("widget demo started: provider=%s url=%s %dx%d dpi=%.2f viewport=%dx%d fps=%d; click inside to send input"),
+		TEXT("widget demo started: provider=%s url=%s %dx%d dpi=%.2f (0=auto) viewport=%dx%d fps=%d; click inside to send input"),
 		*Provider, *UrlDisplay,
 		Width, Height, Dpi, Params.ViewportSize.X, Params.ViewportSize.Y, FrameRate);
 

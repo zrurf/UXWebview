@@ -620,6 +620,7 @@ void FUXWebviewHostClient::FlushPendingCreates()
 		Object->SetStringField(TEXT("shmem"), Instance.SharedMemoryName);
 		Object->SetNumberField(TEXT("width"), Instance.Spec.Size.X);
 		Object->SetNumberField(TEXT("height"), Instance.Spec.Size.Y);
+		Object->SetNumberField(TEXT("scale"), Instance.Spec.DpiScale);
 		Object->SetNumberField(TEXT("fps"), Instance.Spec.FrameRate);
 		Object->SetBoolField(TEXT("visible"), Instance.Spec.bVisible);
 		Object->SetStringField(TEXT("url"), Instance.Spec.Url);
@@ -840,7 +841,7 @@ FUXWebviewResult FUXWebviewHostClient::StopLoading(uint32 InstanceId)
 		: FUXWebviewResult::Fail(EUXWebviewResultCode::HostCrashed, TEXT("IPC write failed"));
 }
 
-FUXWebviewResult FUXWebviewHostClient::Resize(uint32 InstanceId, const FIntPoint& Size)
+FUXWebviewResult FUXWebviewHostClient::Resize(uint32 InstanceId, const FIntPoint& Size, float DpiScale)
 {
 	if (!Instances.Contains(InstanceId))
 	{
@@ -849,8 +850,12 @@ FUXWebviewResult FUXWebviewHostClient::Resize(uint32 InstanceId, const FIntPoint
 
 	FInstance* Instance = Instances.Find(InstanceId);
 	Instance->Spec.Size = Size;
-	return SendRaw(UXWV_IPC_RESIZE, InstanceId, 0, static_cast<uint32>(Size.X),
-		static_cast<uint32>(Size.Y), 0, TArray<uint8>())
+	Instance->Spec.DpiScale = DpiScale;
+
+	TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+	Object->SetNumberField(TEXT("scale"), DpiScale);
+	return SendJson(UXWV_IPC_RESIZE, InstanceId, 0, static_cast<uint32>(Size.X),
+		static_cast<uint32>(Size.Y), SerializeJson(Object))
 		? FUXWebviewResult::Ok()
 		: FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady, TEXT("host is not connected"));
 }

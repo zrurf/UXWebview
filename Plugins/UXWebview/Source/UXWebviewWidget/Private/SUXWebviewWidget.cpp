@@ -10,7 +10,7 @@
 void SUXWebviewWidget::Construct(const FArguments& InArgs)
 {
 	WebView = InArgs._WebView;
-	DpiScale = InArgs._DpiScale > 0.0f ? InArgs._DpiScale : 1.0f;
+	DpiScale = InArgs._DpiScale > 0.0f ? InArgs._DpiScale : 0.0f;
 	bInteractable = InArgs._bInteractable;
 	DesiredSize = InArgs._DesiredSize;
 
@@ -33,7 +33,8 @@ void SUXWebviewWidget::SetWebView(UUXWebview* InWebView)
 
 void SUXWebviewWidget::SetDpiScale(float InDpiScale)
 {
-	DpiScale = InDpiScale > 0.0f ? InDpiScale : 1.0f;
+	// Zero means "follow the layout scale" so web text stays sharp on scaled displays.
+	DpiScale = InDpiScale > 0.0f ? InDpiScale : 0.0f;
 	ViewportSize = FIntPoint::ZeroValue;
 }
 
@@ -72,14 +73,19 @@ void SUXWebviewWidget::UpdateViewport(const FGeometry& AllottedGeometry)
 	}
 
 	const FVector2D WidgetSize = AllottedGeometry.GetLocalSize();
-	const FIntPoint Desired = FUXWebviewCoordinateMapper::ComputeViewportSize(WidgetSize, DpiScale);
-	if (Desired == ViewportSize)
+	// The layout scale is the physical pixel ratio of this panel; rendering at
+	// that ratio keeps web text as sharp as native UMG text.
+	const float LayoutScale = AllottedGeometry.Scale > 0.0f ? AllottedGeometry.Scale : 1.0f;
+	const float EffectiveDpi = DpiScale > 0.0f ? DpiScale : LayoutScale;
+	const FIntPoint Desired = FUXWebviewCoordinateMapper::ComputeViewportSize(WidgetSize, EffectiveDpi);
+	if (Desired == ViewportSize && FMath::IsNearlyEqual(EffectiveDpi, EffectiveDpiScale))
 	{
 		return;
 	}
 
+	EffectiveDpiScale = EffectiveDpi;
 	ViewportSize = Desired;
-	View->SetViewport(ViewportSize, DpiScale);
+	View->SetViewport(ViewportSize, EffectiveDpiScale);
 }
 
 void SUXWebviewWidget::UpdateBrush()
@@ -166,7 +172,7 @@ void SUXWebviewWidget::SyncFocus(bool bFocused)
 FVector2D SUXWebviewWidget::LocalToCss(const FGeometry& Geometry, const FVector2D& LocalPosition) const
 {
 	return FUXWebviewCoordinateMapper::LocalToCss(
-		LocalPosition, Geometry.GetLocalSize(), ViewportSize, DpiScale);
+		LocalPosition, Geometry.GetLocalSize(), ViewportSize, EffectiveDpiScale);
 }
 
 int32 SUXWebviewWidget::MapButton(const FKey& ButtonKey) const

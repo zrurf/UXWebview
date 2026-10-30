@@ -40,9 +40,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UXWebview")
 	TObjectPtr<UUXWebview> WebView;
 
-	/** UI scale used to convert local input to CSS pixels and size the viewport. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UXWebview", meta = (ClampMin = "0.5", ClampMax = "4.0"))
-	float DpiScale = 1.0f;
+	/** 0 follows the layout scale (native pixel density); set a value to force a fixed scale. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UXWebview", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float DpiScale = 0.0f;
 
 	/** Disables hit tests and keyboard focus when false. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UXWebview")

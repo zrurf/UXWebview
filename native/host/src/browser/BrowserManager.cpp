@@ -91,7 +91,7 @@ BrowserManager::~BrowserManager()
 }
 
 bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
-	const std::string& url, int frameRate, bool visible)
+	const std::string& url, int frameRate, bool visible, float deviceScale)
 {
 	if (width <= 0 || height <= 0)
 	{
@@ -118,7 +118,7 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 	}
 
 	instance->Client = new BrowserClient(
-		id, instance->Publisher.get(), width, height,
+		id, instance->Publisher.get(), width, height, deviceScale,
 		[this](uint32_t createdId, CefRefPtr<CefBrowser> browser)
 		{
 			OnBrowserCreated(createdId, browser);
@@ -140,8 +140,8 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 	CefBrowserSettings browserSettings;
 	browserSettings.windowless_frame_rate = frameRate > 0 ? frameRate : 60;
 
-	UXWV_LOG_INFO("instance %u: creating browser %dx%d fps=%d url='%s'",
-		id, width, height, frameRate, url.c_str());
+	UXWV_LOG_INFO("instance %u: creating browser %dx%d at scale %.3f fps=%d url='%s'",
+		id, width, height, deviceScale, frameRate, url.c_str());
 
 	CefBrowserHost::CreateBrowser(
 		windowInfo, raw->Client, CefString(url), browserSettings, nullptr, nullptr);
@@ -227,7 +227,7 @@ void BrowserManager::StopLoading(uint32_t id)
 	}
 }
 
-void BrowserManager::Resize(uint32_t id, int width, int height)
+void BrowserManager::Resize(uint32_t id, int width, int height, float deviceScale)
 {
 	auto it = Instances.find(id);
 	if (it == Instances.end() || width <= 0 || height <= 0)
@@ -236,9 +236,12 @@ void BrowserManager::Resize(uint32_t id, int width, int height)
 	}
 
 	Instance* instance = it->second.get();
-	instance->Client->SetViewSize(width, height);
+	instance->Client->SetViewSize(width, height, deviceScale);
 	if (instance->Browser)
 	{
+		// A new scale changes the DIP layout, which CEF only picks up when the
+		// screen info is reported as changed.
+		instance->Browser->GetHost()->NotifyScreenInfoChanged();
 		instance->Browser->GetHost()->WasResized();
 	}
 }

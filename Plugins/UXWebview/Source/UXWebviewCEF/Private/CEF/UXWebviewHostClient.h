@@ -34,6 +34,8 @@ public:
 struct FUXWebviewHostInstanceSpec
 {
 	FIntPoint Size = FIntPoint(1280, 720);
+	/** Device pixels per CSS pixel; the host reports it to CEF as the screen scale. */
+	float DpiScale = 1.0f;
 	FString Url;
 	int32 FrameRate = 60;
 	bool bVisible = true;
@@ -61,7 +63,7 @@ public:
 	FUXWebviewResult LoadHtml(uint32 InstanceId, const FString& Html, const FString& BaseUrl);
 	FUXWebviewResult Reload(uint32 InstanceId);
 	FUXWebviewResult StopLoading(uint32 InstanceId);
-	FUXWebviewResult Resize(uint32 InstanceId, const FIntPoint& Size);
+	FUXWebviewResult Resize(uint32 InstanceId, const FIntPoint& Size, float DpiScale);
 	FUXWebviewResult SetVisible(uint32 InstanceId, bool bVisible);
 	FUXWebviewResult SetFrameRate(uint32 InstanceId, int32 FramesPerSecond);
 	FUXWebviewResult SetFocus(uint32 InstanceId, bool bFocused);

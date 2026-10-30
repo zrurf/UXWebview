@@ -22,7 +22,7 @@ class SUXWebviewWidget : public SLeafWidget
 public:
 	SLATE_BEGIN_ARGS(SUXWebviewWidget)
 		: _WebView(nullptr)
-		, _DpiScale(1.0f)
+		, _DpiScale(0.0f)
 		, _bInteractable(true)
 		, _DesiredSize(512.0f, 288.0f)
 	{}
@@ -72,6 +72,8 @@ private:
 	FUXWebviewInputFilter Filter;
 	FIntPoint ViewportSize = FIntPoint::ZeroValue;
 	FVector2D DesiredSize = FVector2D(512.0f, 288.0f);
-	float DpiScale = 1.0f;
+	/** Zero follows the layout scale so text renders at native pixel density. */
+	float DpiScale = 0.0f;
+	float EffectiveDpiScale = 1.0f;
 	bool bInteractable = true;
 };

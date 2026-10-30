@@ -51,7 +51,7 @@ void UUXWebviewWidget::SetWebView(UUXWebview* InWebView)
 
 void UUXWebviewWidget::SetDpiScale(float InDpiScale)
 {
-	DpiScale = FMath::Clamp(InDpiScale, 0.5f, 4.0f);
+	DpiScale = FMath::Clamp(InDpiScale, 0.0f, 4.0f);
 	if (SlateWebview.IsValid())
 	{
 		SlateWebview->SetDpiScale(DpiScale);

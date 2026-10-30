@@ -111,6 +111,15 @@ int GetInt(const CefRefPtr<CefDictionaryValue>& dict, const char* key, int fallb
 	return dict->GetInt(key);
 }
 
+float GetFloat(const CefRefPtr<CefDictionaryValue>& dict, const char* key, float fallback)
+{
+	if (!dict || !dict->HasKey(key))
+	{
+		return fallback;
+	}
+	return static_cast<float>(dict->GetDouble(key));
+}
+
 bool GetBool(const CefRefPtr<CefDictionaryValue>& dict, const char* key, bool fallback)
 {
 	if (!dict || !dict->HasKey(key))
@@ -296,7 +305,9 @@ void HostApp::ProcessMessage(const UxIpcMessage& message, const std::vector<uint
 	}
 	case UXWV_IPC_RESIZE:
 	{
-		Manager.Resize(message.Instance, static_cast<int>(message.A), static_cast<int>(message.B));
+		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+		Manager.Resize(message.Instance, static_cast<int>(message.A), static_cast<int>(message.B),
+			GetFloat(dict, "scale", 1.0f));
 		break;
 	}
 	case UXWV_IPC_SET_VISIBLE:
@@ -384,10 +395,11 @@ void HostApp::HandleCreate(const UxIpcMessage& message, const std::vector<uint8_
 	const int height = GetInt(dict, "height", 720);
 	const int frameRate = GetInt(dict, "fps", 60);
 	const bool visible = GetBool(dict, "visible", true);
+	const float deviceScale = GetFloat(dict, "scale", 1.0f);
 	const std::string url = GetString(dict, "url");
 
 	const bool created = Manager.Create(message.Instance, sharedMemory, width, height,
-		url.empty() ? "about:blank" : url, frameRate, visible);
+		url.empty() ? "about:blank" : url, frameRate, visible, deviceScale);
 
 	CefRefPtr<CefDictionaryValue> reply = CefDictionaryValue::Create();
 	reply->SetBool("ok", created);

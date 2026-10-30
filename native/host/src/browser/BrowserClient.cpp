@@ -1,5 +1,8 @@
 #include "browser/BrowserClient.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "cef_browser.h"
 #include "cef_frame.h"
 #include "cef_parser.h"
@@ -33,7 +36,32 @@ std::string MakeUrlCodeJson(const std::string& url, int code)
 
 void BrowserClient::GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect)
 {
-	rect = CefRect(0, 0, Width, Height);
+	rect = CefRect(0, 0, DipWidth, DipHeight);
+}
+
+bool BrowserClient::GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo& screen_info)
+{
+	if (DeviceScale <= 0.0f || std::abs(DeviceScale - 1.0f) < 0.001f)
+	{
+		return false;
+	}
+
+	// Keeping CSS pixels at DIPs makes page text the same size as native UI,
+	// while the paint buffer stays at device resolution and therefore sharp.
+	screen_info.device_scale_factor = DeviceScale;
+	screen_info.depth = 32;
+	screen_info.depth_per_component = 8;
+	screen_info.is_monochrome = false;
+	screen_info.rect = CefRect(0, 0, DipWidth, DipHeight);
+	screen_info.available_rect = screen_info.rect;
+	return true;
+}
+
+void BrowserClient::UpdateDipSize()
+{
+	const float scale = DeviceScale > 0.0f ? DeviceScale : 1.0f;
+	DipWidth = std::max(1, static_cast<int>(std::lround(Width / scale)));
+	DipHeight = std::max(1, static_cast<int>(std::lround(Height / scale)));
 }
 
 void BrowserClient::OnAfterCreated(CefRefPtr<CefBrowser> browser)
@@ -79,7 +107,13 @@ void BrowserClient::OnAcceleratedPaint(CefRefPtr<CefBrowser> browser,
 		return;
 	}
 
-	Publisher->PublishFromHandle(info.shared_texture_handle, Width, Height);
+	// The shared texture is at device resolution, which differs from the DIP
+	// view rect whenever the display is scaled.
+	const int paintWidth = info.extra.coded_size.width > 0
+		? info.extra.coded_size.width : Width;
+	const int paintHeight = info.extra.coded_size.height > 0
+		? info.extra.coded_size.height : Height;
+	Publisher->PublishFromHandle(info.shared_texture_handle, paintWidth, paintHeight);
 }
 
 void BrowserClient::OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
@@ -139,16 +173,20 @@ void BrowserClient::OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
 	Emit(UXWV_IPC_EVENT_CRASH, MakeStringJson("reason", reason));
 }
 
-void BrowserClient::SetViewSize(int width, int height)
+void BrowserClient::SetViewSize(int width, int height, float deviceScale)
 {
-	if (width == Width && height == Height)
+	const float scale = deviceScale > 0.0f ? deviceScale : 1.0f;
+	if (width == Width && height == Height && std::abs(scale - DeviceScale) < 0.001f)
 	{
 		return;
 	}
 
 	Width = width;
 	Height = height;
-	UXWV_LOG_INFO("instance %u: view resized to %dx%d", InstanceId, Width, Height);
+	DeviceScale = scale;
+	UpdateDipSize();
+	UXWV_LOG_INFO("instance %u: view %dx%d px = %dx%d dip at scale %.3f",
+		InstanceId, Width, Height, DipWidth, DipHeight, DeviceScale);
 }
 
 void BrowserClient::Emit(uint32_t eventType, const std::string& json)

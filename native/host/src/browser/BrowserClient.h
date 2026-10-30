@@ -34,15 +34,18 @@ public:
 	using ClosedCallback = std::function<void(uint32_t instanceId)>;
 
 	BrowserClient(uint32_t instanceId, FramePublisher* publisher, int width, int height,
-		CreatedCallback onCreated, ClosedCallback onClosed, BrowserEventCallback onEvent)
+		float deviceScale, CreatedCallback onCreated, ClosedCallback onClosed,
+		BrowserEventCallback onEvent)
 		: InstanceId(instanceId)
 		, Publisher(publisher)
 		, Width(width)
 		, Height(height)
+		, DeviceScale(deviceScale > 0.0f ? deviceScale : 1.0f)
 		, OnCreated(std::move(onCreated))
 		, OnClosed(std::move(onClosed))
 		, OnEvent(std::move(onEvent))
 	{
+		UpdateDipSize();
 	}
 
 	// CefClient
@@ -54,6 +57,7 @@ public:
 
 	// CefRenderHandler
 	void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
+	bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo& screen_info) override;
 	void OnPaint(CefRefPtr<CefBrowser> browser,
 		PaintElementType type,
 		const RectList& dirtyRects,
@@ -86,13 +90,16 @@ public:
 	void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
 		TerminationStatus status, int errorCode, const CefString& errorString) override;
 
-	void SetViewSize(int width, int height);
+	/** Size is in device pixels; CEF lays out at Size/DeviceScale device-independent pixels. */
+	void SetViewSize(int width, int height, float deviceScale);
 	int GetWidth() const { return Width; }
 	int GetHeight() const { return Height; }
+	float GetDeviceScale() const { return DeviceScale; }
 	uint32_t GetInstanceId() const { return InstanceId; }
 
 private:
 	void Emit(uint32_t eventType, const std::string& json);
+	void UpdateDipSize();
 
 	uint32_t InstanceId;
 	FramePublisher* Publisher = nullptr;
@@ -101,6 +108,10 @@ private:
 	BrowserEventCallback OnEvent;
 	int Width;
 	int Height;
+	float DeviceScale = 1.0f;
+	// View size CEF reports through GetViewRect, in device-independent pixels.
+	int DipWidth = 0;
+	int DipHeight = 0;
 	bool bLoggedPaintFallback = false;
 
 	IMPLEMENT_REFCOUNTING(BrowserClient);
