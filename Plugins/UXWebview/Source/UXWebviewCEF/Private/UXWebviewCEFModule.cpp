@@ -49,7 +49,13 @@ void SpikeRun(const TArray<FString>& Args, UWorld* World)
 	const int32 Width = Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 1920;
 	const int32 Height = Args.Num() > 2 ? FCString::Atoi(*Args[2]) : 1080;
 	const int32 Fps = Args.Num() > 3 ? FCString::Atoi(*Args[3]) : 0;
-	const FString Url = Args.Num() > 4 ? Args[4] : FString();
+	// '-' keeps the bench page; the optional scale renders below logical size.
+	const FString Url = (Args.Num() > 4 && Args[4] != TEXT("-")) ? Args[4] : FString();
+	const float Scale = Args.Num() > 5 ? FCString::Atof(*Args[5]) : 0.0f;
+	if (Scale > 0.0f)
+	{
+		FUXWebviewSpike::Get().SetResolutionScale(Scale);
+	}
 
 	if (!FUXWebviewSpike::Get().Start(Width, Height, Url, Fps))
 	{
@@ -103,6 +109,8 @@ void SpikeHiddenRun(const TArray<FString>& Args, UWorld* World)
 	(void)World;
 
 	const float HideSeconds = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 5.0f;
+	// First paint takes a few seconds on a cold page, so keep the widget visible long enough.
+	const float WarmUpSeconds = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 6.0f;
 	if (!FUXWebviewSpike::Get().Start(1920, 1080, FString(), 60))
 	{
 		UE_LOG(LogUXWebviewCEF, Warning, TEXT("spike start failed"));
@@ -111,20 +119,26 @@ void SpikeHiddenRun(const TArray<FString>& Args, UWorld* World)
 
 	TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
 	TSharedPtr<uint64> HiddenStartFrames = MakeShared<uint64>(0);
+	TSharedPtr<uint64> VisibleStartFrames = MakeShared<uint64>(0);
 	TSharedPtr<bool> bHidden = MakeShared<bool>(false);
 	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
-		[Elapsed, HiddenStartFrames, bHidden, HideSeconds](float DeltaTime)
+		[Elapsed, HiddenStartFrames, VisibleStartFrames, bHidden, HideSeconds, WarmUpSeconds](float DeltaTime)
 		{
 			*Elapsed += DeltaTime;
 
-			if (!*bHidden && *Elapsed >= 2.0f)
+			if (!*bHidden && *Elapsed >= WarmUpSeconds)
 			{
+				const uint64 VisibleDelta =
+					FUXWebviewSpike::Get().GetReceivedFrames() - *VisibleStartFrames;
+				UE_LOG(LogUXWebviewCEF, Log, TEXT("visible window %.1fs: %llu frames received"),
+					WarmUpSeconds, VisibleDelta);
+
 				*bHidden = true;
 				*HiddenStartFrames = FUXWebviewSpike::Get().GetReceivedFrames();
 				FUXWebviewSpike::Get().SetVisible(false);
 			}
 
-			if (*bHidden && *Elapsed >= 2.0f + HideSeconds)
+			if (*bHidden && *Elapsed >= WarmUpSeconds + HideSeconds)
 			{
 				const uint64 DeltaFrames =
 					FUXWebviewSpike::Get().GetReceivedFrames() - *HiddenStartFrames;
@@ -172,7 +186,7 @@ FAutoConsoleCommandWithWorldAndArgs GSpikePixelsCommand(
 
 FAutoConsoleCommandWithWorldAndArgs GSpikeRunCommand(
 	TEXT("UXWebview.SpikeRun"),
-	TEXT("UXWebview.SpikeRun [seconds] [width] [height] [fps]"),
+	TEXT("UXWebview.SpikeRun [seconds] [width] [height] [fps] [url|-] [renderScale]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SpikeRun));
 
 FAutoConsoleCommandWithWorldAndArgs GSpikeVisibleCommand(
@@ -180,9 +194,20 @@ FAutoConsoleCommandWithWorldAndArgs GSpikeVisibleCommand(
 	TEXT("UXWebview.SpikeVisible <0|1> hides or shows the spike widget"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SpikeVisible));
 
+FAutoConsoleCommandWithWorldAndArgs GSpikeRenderScaleCommand(
+	TEXT("UXWebview.SpikeRenderScale"),
+	TEXT("UXWebview.SpikeRenderScale <0.5-1.0> renders below the logical size and upscales"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
+		[](const TArray<FString>& Args, UWorld* World)
+		{
+			(void)World;
+			const float Scale = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 1.0f;
+			FUXWebviewSpike::Get().SetResolutionScale(Scale);
+		}));
+
 FAutoConsoleCommandWithWorldAndArgs GSpikeHiddenRunCommand(
 	TEXT("UXWebview.SpikeHiddenRun"),
-	TEXT("UXWebview.SpikeHiddenRun [hiddenSeconds] measures frames produced while hidden"),
+	TEXT("UXWebview.SpikeHiddenRun [hiddenSeconds] [warmUpSeconds] measures frames produced while hidden"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SpikeHiddenRun));
 } // namespace
 #endif

@@ -55,6 +55,9 @@ public:
 	bool IsVisible() const { return Governor.IsVisible(); }
 	uint64 GetReceivedFrames() const { return ReceivedFrames; }
 
+	// Renders the page at a fraction of its logical size; Slate upscales.
+	void SetResolutionScale(float InScale);
+
 	FString GetStatus() const;
 	void ReadbackPixels();
 
@@ -97,6 +100,10 @@ private:
 	FString HostWorkingDir;
 	int32 Width = 1920;
 	int32 Height = 1080;
+	// Size the host actually renders; the widget stays at Width x Height.
+	int32 RenderWidth = 1920;
+	int32 RenderHeight = 1080;
+	float ResolutionScale = 1.0f;
 	int32 TargetFps = 0;
 	bool bBeginFrameMode = false;
 	FUXWebviewFrameGovernor Governor;

@@ -31,9 +31,19 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogUXWebviewSpike, Log, All);
 
+// Shown by `stat UXWebview`. Counters are refreshed from the spike tick.
+DECLARE_STATS_GROUP(TEXT("UXWebview"), STATGROUP_UXWebview, STATCAT_Advanced);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Frames Received"), STAT_UXWebview_FramesReceived, STATGROUP_UXWebview);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Frames Skipped"), STAT_UXWebview_FramesSkipped, STATGROUP_UXWebview);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Pool Switches"), STAT_UXWebview_PoolSwitches, STATGROUP_UXWebview);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Slots Busy"), STAT_UXWebview_SlotsBusy, STATGROUP_UXWebview);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Target FPS"), STAT_UXWebview_TargetFPS, STATGROUP_UXWebview);
+DECLARE_CYCLE_STAT(TEXT("Frame Copy"), STAT_UXWebview_FrameCopy, STATGROUP_UXWebview);
+
 namespace
 {
 constexpr int32 kMaxViewSize = 4096;
+constexpr int32 kMaxTextureSize = 2048;
 constexpr double kHostStartTimeoutSeconds = 20.0;
 uint32 GSpikeSessionCounter = 0;
 
@@ -180,6 +190,21 @@ bool FUXWebviewSpike::Start(int32 InWidth, int32 InHeight, const FString& InUrl,
 	TargetFps = FMath::Clamp(InTargetFps, 0, 240);
 	bBeginFrameMode = TargetFps > 0;
 
+	// Scale the render target, then clamp it so giant viewports stay affordable.
+	const float Scale = FMath::Clamp(ResolutionScale, 0.5f, 1.0f);
+	RenderWidth = FMath::Max(64, FMath::RoundToInt(Width * Scale));
+	RenderHeight = FMath::Max(64, FMath::RoundToInt(Height * Scale));
+	const int32 MaxSide = FMath::Max(RenderWidth, RenderHeight);
+	if (MaxSide > kMaxTextureSize)
+	{
+		const float Fit = static_cast<float>(kMaxTextureSize) / static_cast<float>(MaxSide);
+		RenderWidth = FMath::Max(64, FMath::RoundToInt(RenderWidth * Fit));
+		RenderHeight = FMath::Max(64, FMath::RoundToInt(RenderHeight * Fit));
+		UE_LOG(LogUXWebviewSpike, Warning,
+			TEXT("render size clamped to %dx%d (max texture side %d)"),
+			RenderWidth, RenderHeight, kMaxTextureSize);
+	}
+
 	FUXWebviewGovernorConfig GovernorConfig;
 	const float ActiveRate = TargetFps > 0 ? static_cast<float>(TargetFps) : 60.0f;
 	GovernorConfig.ActiveFrameRate = ActiveRate;
@@ -281,7 +306,7 @@ bool FUXWebviewSpike::StartHostProcess()
 	const uint64 AdapterLuid = GetAdapterLuid();
 	const FString Args = FString::Printf(
 		TEXT("--ipc %s --shmem %s --url %s --width %d --height %d --fps %d --owner-pid %u --luid 0x%llX --cache %s --log %s --log-level 2 --no-sandbox"),
-		*PipeName, *SharedMemoryName, *QuoteArg(Url), Width, Height, TargetFps,
+		*PipeName, *SharedMemoryName, *QuoteArg(Url), RenderWidth, RenderHeight, TargetFps,
 		Pid, AdapterLuid, *QuoteArg(CacheDir), *QuoteArg(HostLogPath));
 
 	UE_LOG(LogUXWebviewSpike, Log, TEXT("RHI adapter LUID 0x%llX"), AdapterLuid);
@@ -355,7 +380,7 @@ bool FUXWebviewSpike::TryConnectAndSetup()
 			// The game viewport may still be loading; keep retrying from Tick.
 			return false;
 		}
-		if (!CreateTextureAndWidget(Width, Height))
+		if (!CreateTextureAndWidget(RenderWidth, RenderHeight))
 		{
 			Stop();
 			return false;
@@ -365,7 +390,8 @@ bool FUXWebviewSpike::TryConnectAndSetup()
 	bConnected = true;
 	NextHealthCheck = FPlatformTime::Seconds() + 1.0;
 	WindowSeconds = FPlatformTime::Seconds();
-	UE_LOG(LogUXWebviewSpike, Log, TEXT("spike running: %dx%d url='%s'"), Width, Height, *Url);
+	UE_LOG(LogUXWebviewSpike, Log, TEXT("spike running: view %dx%d render %dx%d url='%s'"),
+		Width, Height, RenderWidth, RenderHeight, *Url);
 	return true;
 }
 
@@ -387,7 +413,8 @@ bool FUXWebviewSpike::CreateTextureAndWidget(int32 InWidth, int32 InHeight)
 		Brush = MakeShared<FSlateBrush>();
 		Brush->DrawAs = ESlateBrushDrawType::Image;
 	}
-	Brush->ImageSize = FVector2D(InWidth, InHeight);
+	// The brush keeps the logical size so Slate upscales the render texture.
+	Brush->ImageSize = FVector2D(Width, Height);
 
 	if (!ImageWidget)
 	{
@@ -487,7 +514,7 @@ void FUXWebviewSpike::PollFrameSlotCompletions()
 	if (Brush.IsValid())
 	{
 		Brush->SetResourceObject(DisplayTexture);
-		Brush->ImageSize = FVector2D(DisplayWidth, DisplayHeight);
+		Brush->ImageSize = FVector2D(Width, Height);
 		if (ImageWidget.IsValid() && FSlateApplication::IsInitialized())
 		{
 			ImageWidget->Invalidate(EInvalidateWidgetReason::Paint);
@@ -536,7 +563,15 @@ bool FUXWebviewSpike::Tick(float DeltaTime)
 	DrainStats();
 	PollPixelReadback();
 
-	RequestFrameIfDue(Governor.Update(DeltaTime));
+	const float TargetFrameRate = Governor.Update(DeltaTime);
+	RequestFrameIfDue(TargetFrameRate);
+
+	SET_FLOAT_STAT(STAT_UXWebview_TargetFPS, TargetFrameRate);
+	SET_DWORD_STAT(STAT_UXWebview_FramesReceived, ReceivedPerSecond);
+	SET_DWORD_STAT(STAT_UXWebview_FramesSkipped, static_cast<uint32>(PoolDrops));
+	SET_DWORD_STAT(STAT_UXWebview_PoolSwitches, static_cast<uint32>(PoolSwitches));
+	SET_DWORD_STAT(STAT_UXWebview_SlotsBusy, static_cast<uint32>(
+		FrameSlots.NumSlots() - FrameSlots.CountInState(EUXWebviewFrameSlotState::Free)));
 
 	if (Now >= NextHealthCheck)
 	{
@@ -670,6 +705,8 @@ void FUXWebviewSpike::EnqueueFrameCopy(const FUXWebviewFrameSample& Sample)
 
 void FUXWebviewSpike::RenderFrameCopy(FRHICommandListImmediate& RHICmdList, FUXWebviewFrameSample Sample)
 {
+	SCOPE_CYCLE_COUNTER(STAT_UXWebview_FrameCopy);
+
 	FUXWebviewCopyResult Result;
 	Result.SlotIndex = Sample.SlotIndex;
 
@@ -1004,6 +1041,13 @@ void FUXWebviewSpike::SetVisible(bool bVisible)
 	}
 	UE_LOG(LogUXWebviewSpike, Log, TEXT("spike visibility %s"),
 		bVisible ? TEXT("on") : TEXT("off"));
+}
+
+void FUXWebviewSpike::SetResolutionScale(float InScale)
+{
+	ResolutionScale = FMath::Clamp(InScale, 0.5f, 1.0f);
+	UE_LOG(LogUXWebviewSpike, Log, TEXT("resolution scale %.2f, applied on next start"),
+		ResolutionScale);
 }
 
 FString FUXWebviewSpike::GetStatus() const
