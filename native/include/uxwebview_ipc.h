@@ -59,13 +59,18 @@ typedef enum UxIpcType
     UXWV_IPC_REQUEST_DEVTOOLS = 22,
     UXWV_IPC_EVENT_DEVTOOLS   = 23,
 
+    /* Script bridge: page -> game queries and their replies. */
+    UXWV_IPC_EMIT           = 24, /* plugin -> host: payload {"event": "...", "payload": "..."} */
+    UXWV_IPC_BRIDGE_RESULT  = 25, /* plugin -> host: payload {"request": n, "success": bool, "result": "..."} */
+
     /* Host -> plugin events. Event names are the message type. */
     UXWV_IPC_EVENT_READY      = 30, /* browser created */
     UXWV_IPC_EVENT_LOAD_START = 31,
     UXWV_IPC_EVENT_LOAD_END   = 32, /* payload {"url": "...", "code": int} */
     UXWV_IPC_EVENT_TITLE      = 33, /* payload {"title": "..."} */
     UXWV_IPC_EVENT_URL        = 34, /* payload {"url": "..."} */
-    UXWV_IPC_EVENT_CRASH      = 35  /* payload {"reason": "..."} */
+    UXWV_IPC_EVENT_CRASH      = 35, /* payload {"reason": "..."} */
+    UXWV_IPC_EVENT_BRIDGE     = 36  /* payload {"name": "...", "payload": "...", "request": n} */
 } UxIpcType;
 
 typedef enum UxIpcFlags

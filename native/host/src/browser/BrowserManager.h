@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "cef_browser.h"
 
@@ -25,7 +26,8 @@ public:
 	~BrowserManager();
 
 	bool Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
-		const std::string& url, int frameRate, bool visible, float deviceScale = 1.0f);
+		const std::string& url, int frameRate, bool visible, float deviceScale,
+		const std::vector<std::string>& allowedOrigins);
 	void Destroy(uint32_t id);
 	void ShutdownAll();
 
@@ -45,6 +47,8 @@ public:
 
 	void SendInput(uint32_t id, const UxInputEvent& event, const std::string& text);
 	void ExecuteScript(uint32_t id, uint32_t requestId, const std::string& script);
+	void EmitToWeb(uint32_t id, const std::string& event, const std::string& payloadJson);
+	void ResolveBridge(uint32_t id, int64_t queryId, bool success, const std::string& result);
 
 private:
 	struct Instance

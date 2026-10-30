@@ -39,7 +39,9 @@ constexpr int32 kMaxViewSize = 2048;
 // High refresh displays go well past 120 Hz; the ticker only ever asks for one
 // frame per game frame, so a higher ceiling costs nothing when it is unused.
 constexpr int32 kMaxFrameRate = 240;
-constexpr double kScriptTimeoutSeconds = 5.0;
+constexpr double kScriptTimeoutSeconds = 30.0;
+/** A page query that the game never answers is rejected after this delay. */
+constexpr double kBridgeTimeoutSeconds = 30.0;
 constexpr double kSummaryIntervalSeconds = 5.0;
 
 void RenderFrameCopy(FRHICommandListImmediate& RHICmdList,
@@ -254,6 +256,7 @@ void FUXWebviewCEFProvider::Shutdown()
 	ReleaseFramePool();
 	FrameSlots.Reset(3);
 	PendingScripts.Reset();
+	PendingBridge.Reset();
 	DisplayTexture = nullptr;
 	Client = nullptr;
 	LastSeq = 0;
@@ -422,10 +425,12 @@ FUXWebviewResult FUXWebviewCEFProvider::ExecuteScript(
 
 FUXWebviewResult FUXWebviewCEFProvider::EmitToWeb(const FString& EventName, const FString& PayloadJson)
 {
-	(void)EventName;
-	(void)PayloadJson;
-	return FUXWebviewResult::Fail(EUXWebviewResultCode::NotSupported,
-		TEXT("cef script bridge arrives with M6"));
+	const FUXWebviewResult Guard = GuardInitialized();
+	if (!Guard.bSuccess)
+	{
+		return Guard;
+	}
+	return FUXWebviewHostClient::Get().EmitToWeb(InstanceId, EventName, PayloadJson);
 }
 
 FUXWebviewResult FUXWebviewCEFProvider::SendInput(const FUXWebviewInputEvent& Event)
@@ -586,6 +591,36 @@ void FUXWebviewCEFProvider::OnHostScriptResult(uint32 RequestId, bool bSuccess, 
 	}
 }
 
+void FUXWebviewCEFProvider::OnHostBridgeMessage(const FString& Name,
+	const FString& PayloadJson, uint32 RequestId)
+{
+	if (!Client)
+	{
+		FUXWebviewHostClient::Get().ReplyBridge(InstanceId, RequestId, false,
+			TEXT("no view client"));
+		return;
+	}
+
+	// The shared flag lets a game reply and the timeout race safely: whichever
+	// resolves first wins, the other is dropped.
+	TSharedPtr<FUXWebviewBridgeRequest> Request = MakeShared<FUXWebviewBridgeRequest>();
+	Request->Deadline = FPlatformTime::Seconds() + kBridgeTimeoutSeconds;
+	PendingBridge.Add(RequestId, Request);
+
+	const uint32 ReplyInstance = InstanceId;
+	Client->OnViewScriptMessage(Name, PayloadJson, static_cast<int32>(RequestId),
+		[ReplyInstance, RequestId, Request](bool bSuccess, const FString& Result)
+		{
+			if (Request->bResolved)
+			{
+				return;
+			}
+			Request->bResolved = true;
+			FUXWebviewHostClient::Get().ReplyBridge(
+				ReplyInstance, RequestId, bSuccess, Result);
+		});
+}
+
 void FUXWebviewCEFProvider::OnHostDevTools(const FString& Url)
 {
 	UE_LOG(LogUXWebviewCEFProvider, Log, TEXT("instance %u devtools at '%s'"), InstanceId, *Url);
@@ -599,6 +634,7 @@ bool FUXWebviewCEFProvider::Tick(float DeltaSeconds)
 	}
 
 	PollScriptTimeouts();
+	PollBridgeTimeouts();
 
 	if (!bHostLost)
 	{
@@ -984,6 +1020,36 @@ void FUXWebviewCEFProvider::PollScriptTimeouts()
 		if (Callback)
 		{
 			Callback(false, TEXT("timeout"));
+		}
+	}
+}
+
+void FUXWebviewCEFProvider::PollBridgeTimeouts()
+{
+	if (PendingBridge.Num() == 0)
+	{
+		return;
+	}
+
+	const double Now = FPlatformTime::Seconds();
+	TArray<uint32> Finished;
+	for (const TPair<uint32, TSharedPtr<FUXWebviewBridgeRequest>>& Pair : PendingBridge)
+	{
+		if (!Pair.Value.IsValid() || Pair.Value->bResolved || Now >= Pair.Value->Deadline)
+		{
+			Finished.Add(Pair.Key);
+		}
+	}
+
+	for (const uint32 RequestId : Finished)
+	{
+		TSharedPtr<FUXWebviewBridgeRequest> Request = PendingBridge.FindRef(RequestId);
+		PendingBridge.Remove(RequestId);
+		if (Request.IsValid() && !Request->bResolved)
+		{
+			Request->bResolved = true;
+			FUXWebviewHostClient::Get().ReplyBridge(
+				InstanceId, RequestId, false, TEXT("timeout"));
 		}
 	}
 }

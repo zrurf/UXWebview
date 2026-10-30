@@ -16,6 +16,13 @@
 
 class UTexture2D;
 
+/** One page query waiting for a game reply; shared so a late reply is ignored. */
+struct FUXWebviewBridgeRequest
+{
+	double Deadline = 0.0;
+	bool bResolved = false;
+};
+
 /** Render thread outcome of one shared texture copy, drained on the game thread. */
 struct FUXWebviewCefCopyResult
 {
@@ -94,6 +101,8 @@ public:
 	virtual void OnHostCrash(const FString& Reason) override;
 	virtual void OnHostRecovered() override;
 	virtual void OnHostScriptResult(uint32 RequestId, bool bSuccess, const FString& Result) override;
+	virtual void OnHostBridgeMessage(const FString& Name, const FString& PayloadJson,
+		uint32 RequestId) override;
 	virtual void OnHostDevTools(const FString& Url) override;
 
 private:
@@ -112,6 +121,7 @@ private:
 	void ResetRenderSources();
 	void RequestFrameIfDue(float TargetRate);
 	void PollScriptTimeouts();
+	void PollBridgeTimeouts();
 
 	IUXWebviewViewClient* Client = nullptr;
 	uint32 InstanceId = 0;
@@ -168,6 +178,8 @@ private:
 
 	TMap<uint32, TPair<FUXWebviewScriptCallback, double>> PendingScripts;
 	uint32 NextScriptRequestId = 1;
+
+	TMap<uint32, TSharedPtr<FUXWebviewBridgeRequest>> PendingBridge;
 
 	FTSTicker::FDelegateHandle TickerHandle;
 };

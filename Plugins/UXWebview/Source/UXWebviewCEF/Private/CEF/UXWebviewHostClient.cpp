@@ -629,6 +629,13 @@ void FUXWebviewHostClient::FlushPendingCreates()
 		Object->SetBoolField(TEXT("visible"), Instance.Spec.bVisible);
 		Object->SetStringField(TEXT("url"), Instance.Spec.Url);
 
+		TArray<TSharedPtr<FJsonValue>> Origins;
+		for (const FString& Origin : UUXWebviewSettings::Get().BridgeAllowedOrigins)
+		{
+			Origins.Add(MakeShared<FJsonValueString>(Origin));
+		}
+		Object->SetArrayField(TEXT("origins"), Origins);
+
 		SendJson(UXWV_IPC_CREATE, Id, Id, 0, 0, SerializeJson(Object));
 		Instance.bCreateSent = true;
 	});
@@ -744,6 +751,14 @@ void FUXWebviewHostClient::Dispatch(const FUXWebviewIpcEnvelope& Envelope)
 				static_cast<uint32>(JsonInt(Object, TEXT("request"), 0)),
 				JsonBool(Object, TEXT("success"), false),
 				JsonString(Object, TEXT("result")));
+		}
+		break;
+	case UXWV_IPC_EVENT_BRIDGE:
+		if (Client)
+		{
+			Client->OnHostBridgeMessage(JsonString(Object, TEXT("name")),
+				JsonString(Object, TEXT("payload")),
+				static_cast<uint32>(JsonInt(Object, TEXT("request"), 0)));
 		}
 		break;
 	case UXWV_IPC_EVENT_DEVTOOLS:
@@ -941,6 +956,39 @@ FUXWebviewResult FUXWebviewHostClient::ExecuteScript(uint32 InstanceId, uint32 R
 	TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
 	Object->SetStringField(TEXT("script"), Script);
 	return SendJson(UXWV_IPC_EXEC, InstanceId, RequestId, 0, 0, SerializeJson(Object))
+		? FUXWebviewResult::Ok()
+		: FUXWebviewResult::Fail(EUXWebviewResultCode::HostCrashed, TEXT("IPC write failed"));
+}
+
+FUXWebviewResult FUXWebviewHostClient::EmitToWeb(uint32 InstanceId, const FString& Event,
+	const FString& PayloadJson)
+{
+	if (!IsInstanceReady(InstanceId))
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady, TEXT("host instance is not ready"));
+	}
+
+	TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+	Object->SetStringField(TEXT("event"), Event);
+	Object->SetStringField(TEXT("payload"), PayloadJson);
+	return SendJson(UXWV_IPC_EMIT, InstanceId, 0, 0, 0, SerializeJson(Object))
+		? FUXWebviewResult::Ok()
+		: FUXWebviewResult::Fail(EUXWebviewResultCode::HostCrashed, TEXT("IPC write failed"));
+}
+
+FUXWebviewResult FUXWebviewHostClient::ReplyBridge(uint32 InstanceId, uint32 RequestId,
+	bool bSuccess, const FString& Result)
+{
+	if (!Instances.Contains(InstanceId))
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotFound, TEXT("unknown host instance"));
+	}
+
+	TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+	Object->SetNumberField(TEXT("request"), static_cast<double>(RequestId));
+	Object->SetBoolField(TEXT("success"), bSuccess);
+	Object->SetStringField(TEXT("result"), Result);
+	return SendJson(UXWV_IPC_BRIDGE_RESULT, InstanceId, RequestId, 0, 0, SerializeJson(Object))
 		? FUXWebviewResult::Ok()
 		: FUXWebviewResult::Fail(EUXWebviewResultCode::HostCrashed, TEXT("IPC write failed"));
 }

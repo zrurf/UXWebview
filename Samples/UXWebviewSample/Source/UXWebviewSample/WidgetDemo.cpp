@@ -13,6 +13,7 @@
 #include "UUXWebview.h"
 #include "UUXWebviewSubsystem.h"
 #include "UUXWebviewWidget.h"
+#include "UXWebviewSample.h"
 #include "Widgets/Layout/SBox.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUXWebviewWidgetDemo, Log, All);
@@ -28,6 +29,24 @@ FTSTicker::FDelegateHandle GWidgetDemoTicker;
 /** Optional second instance used to smoke-test multiple webviews on one host. */
 TSharedPtr<SWidget> GWidgetSecondRoot;
 TWeakObjectPtr<UUXWebview> GWidgetSecondWebview;
+
+/** Answers page bridge queries while the demo runs. */
+UUXWebviewSampleBridgeHandler* GWidgetBridgeHandler = nullptr;
+
+void BindBridgeHandler(UUXWebview* View)
+{
+	if (GWidgetBridgeHandler)
+	{
+		GWidgetBridgeHandler->RemoveFromRoot();
+		GWidgetBridgeHandler = nullptr;
+	}
+
+	GWidgetBridgeHandler = NewObject<UUXWebviewSampleBridgeHandler>();
+	GWidgetBridgeHandler->SetView(View);
+	GWidgetBridgeHandler->AddToRoot();
+	View->OnScriptMessage.AddDynamic(GWidgetBridgeHandler,
+		&UUXWebviewSampleBridgeHandler::HandleScriptMessage);
+}
 
 void StopWidgetDemo()
 {
@@ -54,6 +73,12 @@ void StopWidgetDemo()
 	GWidgetSecondRoot.Reset();
 	GWidgetDemoRoot.Reset();
 	GWidgetDemoWidget.Reset();
+
+	if (GWidgetBridgeHandler)
+	{
+		GWidgetBridgeHandler->RemoveFromRoot();
+		GWidgetBridgeHandler = nullptr;
+	}
 
 	if (GWidgetDemoGameInstance.IsValid())
 	{
@@ -294,6 +319,54 @@ void LoadHtmlCommand(const TArray<FString>& Args, UWorld* World)
 		[Html, FilePath](UUXWebview* View) { View->LoadHTML(Html, FilePath); });
 }
 
+/** Runs a page bridge query and logs the reply the page received. */
+void BridgeCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 2.0f;
+	ScheduleViewAction(Delay, TEXT("bridge call"), [](UUXWebview* View)
+	{
+		BindBridgeHandler(View);
+
+		const FString Script = TEXT(
+			"window.uxwv.call('ping', {value: 42})"
+			".then(function(v){return 'bridge:' + JSON.stringify(v);})"
+			".catch(function(e){return 'bridge-error:' + e;});");
+		View->ExecuteScript(Script, [](bool bSuccess, const FString& Result)
+		{
+			UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("bridge result ok=%d '%s'"),
+				bSuccess ? 1 : 0, *Result);
+		});
+
+		// A throwing script must be reported, never crash the webview.
+		View->ExecuteScript(TEXT("throw new Error('bridge-probe-error');"),
+			[](bool bSuccess, const FString& Result)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("bridge error probe ok=%d '%s'"),
+					bSuccess ? 1 : 0, *Result);
+			});
+	});
+}
+
+/** Sends a game event to the page as a 'uxwv' CustomEvent. */
+void EmitCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 2.0f;
+	const FString EventName = Args.Num() > 1 ? Args[1] : FString(TEXT("demo"));
+	const FString Payload = Args.Num() > 2 ? Args[2] : FString(TEXT("{\"value\":7}"));
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("emit %s"), *EventName),
+		[EventName, Payload](UUXWebview* View)
+		{
+			const FUXWebviewResult Result = View->EmitToWeb(EventName, Payload);
+			if (!Result.bSuccess)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("emit failed: %s"), *Result.Message);
+			}
+		});
+}
+
 /** Adds a second webview on the same host so multi-instance routing can be smoke-tested. */
 void SecondViewCommand(const TArray<FString>& Args, UWorld* World)
 {
@@ -398,6 +471,16 @@ FAutoConsoleCommandWithWorldAndArgs GWidgetLoadHtmlCommand(
 	TEXT("UXWebviewSample.WidgetLoadHtml"),
 	TEXT("UXWebviewSample.WidgetLoadHtml [delay] [file] - loads the file content through LoadHTML"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&LoadHtmlCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetBridgeCommand(
+	TEXT("UXWebviewSample.WidgetBridge"),
+	TEXT("UXWebviewSample.WidgetBridge [delay] - makes the page call window.uxwv.call and logs the reply"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&BridgeCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetEmitCommand(
+	TEXT("UXWebviewSample.WidgetEmit"),
+	TEXT("UXWebviewSample.WidgetEmit [delay] [event] [payloadJson] - sends a game event to the page"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&EmitCommand));
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetSecondViewCommand(
 	TEXT("UXWebviewSample.WidgetSecond"),

@@ -8,6 +8,7 @@
 
 #include "cef_app.h"
 #include "cef_client.h"
+#include "wrapper/cef_message_router.h"
 
 #include "app/HostOptions.h"
 #include "browser/BrowserManager.h"
@@ -21,7 +22,8 @@ class IpcServer;
 // thread and are forwarded to the CEF UI thread; before CEF is initialized
 // they are buffered so a fast plugin cannot lose the first commands.
 class HostApp : public CefApp,
-                public CefBrowserProcessHandler
+                public CefBrowserProcessHandler,
+                public CefRenderProcessHandler
 {
 public:
 	explicit HostApp(HostOptions options);
@@ -32,17 +34,27 @@ public:
 
 	// CefApp
 	CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+	CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
 	void OnBeforeCommandLineProcessing(const CefString& processType,
 		CefRefPtr<CefCommandLine> commandLine) override;
 
 	// CefBrowserProcessHandler
 	void OnContextInitialized() override;
 
+	// CefRenderProcessHandler (renderer subprocess: install the bridge scripts)
+	void OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+		CefRefPtr<CefV8Context> context) override;
+	void OnContextReleased(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+		CefRefPtr<CefV8Context> context) override;
+	bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+		CefProcessId sourceProcess, CefRefPtr<CefProcessMessage> message) override;
+
 	// Internal entry points used by UI-thread tasks.
 	void ProcessMessage(const UxIpcMessage& message, const std::vector<uint8_t>& payload);
 	void CheckIdle();
 
 private:
+	void EnsureRendererRouters();
 	// Runs on the pipe thread; buffers until the UI thread is available.
 	void OnIpcMessage(const UxIpcMessage& message, const std::vector<uint8_t>& payload);
 	void FlushPendingMessages();
@@ -68,6 +80,10 @@ private:
 	bool bQuitting = false;
 	double EmptySinceSeconds = 0.0;
 	double LastIdleCheckSeconds = 0.0;
+
+	/** Renderer-side halves of the message routers; created on first context. */
+	CefRefPtr<CefMessageRouterRendererSide> RendererBridgeRouter;
+	CefRefPtr<CefMessageRouterRendererSide> RendererExecRouter;
 
 	IMPLEMENT_REFCOUNTING(HostApp);
 };

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 
+#include "cef_frame.h"
 #include "cef_parser.h"
 #include "cef_task.h"
 #include "cef_values.h"
@@ -11,6 +12,7 @@
 #include <Windows.h>
 #endif
 
+#include "browser/BridgeScript.h"
 #include "ipc/IpcServer.h"
 #include "util/Log.h"
 
@@ -129,6 +131,25 @@ bool GetBool(const CefRefPtr<CefDictionaryValue>& dict, const char* key, bool fa
 	return dict->GetBool(key);
 }
 
+std::vector<std::string> GetStringList(const CefRefPtr<CefDictionaryValue>& dict, const char* key)
+{
+	std::vector<std::string> values;
+	if (!dict || !dict->HasKey(key) || dict->GetType(key) != VTYPE_LIST)
+	{
+		return values;
+	}
+
+	CefRefPtr<CefListValue> list = dict->GetList(key);
+	for (size_t index = 0; index < list->GetSize(); ++index)
+	{
+		if (list->GetType(index) == VTYPE_STRING)
+		{
+			values.push_back(list->GetString(index).ToString());
+		}
+	}
+	return values;
+}
+
 bool ParseInput(const std::vector<uint8_t>& payload, UxInputEvent& event, std::string& text)
 {
 	if (payload.size() < sizeof(UxInputEvent))
@@ -221,6 +242,66 @@ void HostApp::OnContextInitialized()
 	UXWV_LOG_INFO("CEF context initialized");
 	FlushPendingMessages();
 	ScheduleIdleCheck();
+}
+
+void HostApp::EnsureRendererRouters()
+{
+	if (RendererBridgeRouter && RendererExecRouter)
+	{
+		return;
+	}
+
+	CefMessageRouterConfig bridgeConfig;
+	bridgeConfig.js_query_function = BridgeQueryFunction();
+	bridgeConfig.js_cancel_function = std::string(BridgeQueryFunction()) + "Cancel";
+	RendererBridgeRouter = CefMessageRouterRendererSide::Create(bridgeConfig);
+
+	CefMessageRouterConfig execConfig;
+	execConfig.js_query_function = ExecQueryFunction();
+	execConfig.js_cancel_function = std::string(ExecQueryFunction()) + "Cancel";
+	RendererExecRouter = CefMessageRouterRendererSide::Create(execConfig);
+}
+
+void HostApp::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+	CefRefPtr<CefV8Context> context)
+{
+	EnsureRendererRouters();
+	RendererBridgeRouter->OnContextCreated(browser, frame, context);
+	RendererExecRouter->OnContextCreated(browser, frame, context);
+
+	// Only the main frame gets the friendly page API; iframe queries are also
+	// origin checked against their own URL by the browser side.
+	if (frame && frame->IsMain())
+	{
+		UXWV_LOG_INFO("renderer context created for '%s'",
+			frame->GetURL().ToString().c_str());
+		frame->ExecuteJavaScript(CefString(BridgeBootstrapScript()), frame->GetURL(), 0);
+	}
+}
+
+void HostApp::OnContextReleased(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+	CefRefPtr<CefV8Context> context)
+{
+	if (!RendererBridgeRouter)
+	{
+		return;
+	}
+	RendererBridgeRouter->OnContextReleased(browser, frame, context);
+	RendererExecRouter->OnContextReleased(browser, frame, context);
+}
+
+bool HostApp::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+	CefProcessId sourceProcess, CefRefPtr<CefProcessMessage> message)
+{
+	if (!RendererBridgeRouter)
+	{
+		return false;
+	}
+	if (RendererBridgeRouter->OnProcessMessageReceived(browser, frame, sourceProcess, message))
+	{
+		return true;
+	}
+	return RendererExecRouter->OnProcessMessageReceived(browser, frame, sourceProcess, message);
 }
 
 void HostApp::OnIpcMessage(const UxIpcMessage& message, const std::vector<uint8_t>& payload)
@@ -340,8 +421,34 @@ void HostApp::ProcessMessage(const UxIpcMessage& message, const std::vector<uint
 		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
 		if (dict)
 		{
+			UXWV_LOG_INFO("instance %u: exec request %u", message.Instance, message.RequestId);
 			Manager.ExecuteScript(message.Instance, message.RequestId,
 				GetString(dict, "script"));
+		}
+		else
+		{
+			UXWV_LOG_WARN("instance %u: exec request %u without a payload",
+				message.Instance, message.RequestId);
+		}
+		break;
+	}
+	case UXWV_IPC_EMIT:
+	{
+		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+		if (dict)
+		{
+			Manager.EmitToWeb(message.Instance, GetString(dict, "event"),
+				GetString(dict, "payload"));
+		}
+		break;
+	}
+	case UXWV_IPC_BRIDGE_RESULT:
+	{
+		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+		if (dict)
+		{
+			Manager.ResolveBridge(message.Instance, GetInt(dict, "request", 0),
+				GetBool(dict, "success", false), GetString(dict, "result"));
 		}
 		break;
 	}
@@ -397,9 +504,10 @@ void HostApp::HandleCreate(const UxIpcMessage& message, const std::vector<uint8_
 	const bool visible = GetBool(dict, "visible", true);
 	const float deviceScale = GetFloat(dict, "scale", 1.0f);
 	const std::string url = GetString(dict, "url");
+	const std::vector<std::string> allowedOrigins = GetStringList(dict, "origins");
 
 	const bool created = Manager.Create(message.Instance, sharedMemory, width, height,
-		url.empty() ? "about:blank" : url, frameRate, visible, deviceScale);
+		url.empty() ? "about:blank" : url, frameRate, visible, deviceScale, allowedOrigins);
 
 	CefRefPtr<CefDictionaryValue> reply = CefDictionaryValue::Create();
 	reply->SetBool("ok", created);

@@ -13,6 +13,8 @@ class UTexture2D;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FUXWebviewReadyDelegate);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUXWebviewUrlDelegate, const FString&, Url);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUXWebviewCrashDelegate, const FString&, Reason);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FUXWebviewScriptMessageDelegate,
+	const FString&, Name, const FString&, PayloadJson, int32, RequestId);
 
 /**
  * One web content instance. Owned by UUXWebviewSubsystem and must only be used
@@ -51,6 +53,13 @@ public:
 	FUXWebviewResult ExecuteScript(const FString& Script, FUXWebviewScriptCallback OnResult);
 	FUXWebviewResult EmitToWeb(const FString& EventName, const FString& PayloadJson);
 
+	/**
+	 * Settles the page query delivered through OnScriptMessage. ResultJson is
+	 * passed to the JS promise as-is, so it must be valid JSON text.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
+	bool RespondToScriptMessage(int32 RequestId, bool bSuccess, const FString& ResultJson);
+
 	FUXWebviewResult SendInput(const FUXWebviewInputEvent& Event);
 	FUXWebviewResult SetFocus(bool bFocused);
 	FUXWebviewResult RequestFrame();
@@ -65,11 +74,17 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
 	FUXWebviewCrashDelegate OnCrashed;
 
+	/** A page called window.uxwv.call/emit; answer with RespondToScriptMessage. */
+	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
+	FUXWebviewScriptMessageDelegate OnScriptMessage;
+
 	// IUXWebviewViewClient
 	virtual void OnViewReady() override;
 	virtual void OnViewLoadCompleted(const FString& Url) override;
 	virtual void OnViewFrame(int32 Width, int32 Height) override;
 	virtual void OnViewCrash(const FString& Reason) override;
+	virtual void OnViewScriptMessage(const FString& Name, const FString& PayloadJson,
+		int32 RequestId, FUXWebviewBridgeReply Reply) override;
 
 protected:
 	virtual void BeginDestroy() override;
@@ -92,6 +107,12 @@ private:
 	/** Keeps the provider frame texture alive between GC runs. */
 	UPROPERTY(Transient)
 	TObjectPtr<UTexture2D> CachedTexture;
+
+	/** Page queries waiting for the game to call RespondToScriptMessage. */
+	TMap<int32, FUXWebviewBridgeReply> PendingScriptReplies;
+
+	/** Rejects every outstanding query, e.g. when the view goes away. */
+	void FailPendingScriptReplies(const FString& Reason);
 
 	int32 FrameWidth = 0;
 	int32 FrameHeight = 0;

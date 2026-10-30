@@ -91,7 +91,8 @@ BrowserManager::~BrowserManager()
 }
 
 bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
-	const std::string& url, int frameRate, bool visible, float deviceScale)
+	const std::string& url, int frameRate, bool visible, float deviceScale,
+	const std::vector<std::string>& allowedOrigins)
 {
 	if (width <= 0 || height <= 0)
 	{
@@ -127,7 +128,7 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 		[this](uint32_t eventInstance, uint32_t type, const std::string& json)
 		{
 			Emit(eventInstance, type, json);
-		});
+		}, allowedOrigins);
 
 	Instance* raw = instance.get();
 	Instances[id] = std::move(instance);
@@ -356,22 +357,34 @@ void BrowserManager::ExecuteScript(uint32_t id, uint32_t requestId, const std::s
 		return;
 	}
 
-	CefRefPtr<CefFrame> frame = it->second->Browser->GetMainFrame();
-	if (!frame)
+	// The result comes back through UXWV_IPC_EXEC_RESULT once the wrapper
+	// finishes, so a hanging script cannot block the browser process.
+	it->second->Client->ExecuteScript(requestId, script);
+}
+
+void BrowserManager::EmitToWeb(uint32_t id, const std::string& event, const std::string& payloadJson)
+{
+	auto it = Instances.find(id);
+	if (it == Instances.end() || !it->second->Client)
 	{
 		return;
 	}
-	// CEF 156 dropped the result visitor from ExecuteJavaScript; the script
-	// runs fire-and-forget and results arrive with the M6 script bridge.
-	frame->ExecuteJavaScript(CefString(script), frame->GetURL(), 0);
+	it->second->Client->EmitEvent(event, payloadJson);
+}
 
-	CefRefPtr<CefDictionaryValue> result = CefDictionaryValue::Create();
-	result->SetBool("success", true);
-	result->SetString("result", std::string());
-	result->SetInt("request", static_cast<int>(requestId));
-	CefRefPtr<CefValue> root = CefValue::Create();
-	root->SetDictionary(result);
-	Emit(id, UXWV_IPC_EXEC_RESULT, CefWriteJSON(root, JSON_WRITER_DEFAULT).ToString());
+void BrowserManager::ResolveBridge(uint32_t id, int64_t queryId, bool success,
+	const std::string& result)
+{
+	auto it = Instances.find(id);
+	if (it == Instances.end() || !it->second->Client)
+	{
+		return;
+	}
+	if (!it->second->Client->ResolveBridge(queryId, success, result))
+	{
+		UXWV_LOG_WARN("instance %u: bridge query %lld is no longer pending", id,
+			static_cast<long long>(queryId));
+	}
 }
 
 void BrowserManager::OnBrowserCreated(uint32_t id, CefRefPtr<CefBrowser> browser)

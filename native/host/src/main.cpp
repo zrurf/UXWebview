@@ -36,6 +36,21 @@ bool StartsWith(const std::string& value, const char* prefix)
 	return value.rfind(prefix, 0) == 0;
 }
 
+/** Subprocesses may start without --log; keep their diagnostics discoverable. */
+std::string TempLogPath()
+{
+#if defined(_WIN32)
+	char buffer[MAX_PATH] = {};
+	if (GetTempPathA(MAX_PATH, buffer) == 0)
+	{
+		return std::string("UXWebviewHost");
+	}
+	return std::string(buffer) + "UXWebviewHost";
+#else
+	return std::string("UXWebviewHost");
+#endif
+}
+
 int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 {
 	for (int i = 1; i < argc; ++i)
@@ -119,7 +134,25 @@ int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 int main(int argc, char** argv)
 {
 	// CEF subprocesses (renderer, gpu, utility) must exit through this path
-	// before any other work happens.
+	// before any other work happens. They inherit the parent command line, so
+	// the log switches are honored here as well; each process writes its own
+	// file because several processes cannot append to one file safely.
+	std::string subprocessType;
+	for (int i = 1; i < argc; ++i)
+	{
+		if (StartsWith(argv[i], "--type="))
+		{
+			subprocessType = std::string(argv[i] + 7);
+		}
+	}
+	if (!subprocessType.empty())
+	{
+		// Subprocess diagnostics always run at debug level: they are low volume
+		// and only written when a --log path or the temp fallback is available.
+		uxwv::LogInit(TempLogPath() + "." + subprocessType + ".log", uxwv::LogLevel::Debug);
+		UXWV_LOG_INFO("CEF subprocess '%s' starting", subprocessType.c_str());
+	}
+
 #if defined(_WIN32)
 	CefMainArgs mainArgs(GetModuleHandle(nullptr));
 #else

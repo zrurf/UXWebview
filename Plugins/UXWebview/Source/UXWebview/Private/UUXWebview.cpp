@@ -80,6 +80,7 @@ void UUXWebview::Destroy()
 
 void UUXWebview::ShutdownProvider()
 {
+	FailPendingScriptReplies(TEXT("webview shut down"));
 	if (Provider)
 	{
 		Provider->Shutdown();
@@ -222,6 +223,24 @@ FUXWebviewResult UUXWebview::EmitToWeb(const FString& EventName, const FString& 
 	return Ready.bSuccess ? Provider->EmitToWeb(EventName, PayloadJson) : Ready;
 }
 
+bool UUXWebview::RespondToScriptMessage(int32 RequestId, bool bSuccess, const FString& ResultJson)
+{
+	FUXWebviewBridgeReply* Found = PendingScriptReplies.Find(RequestId);
+	if (!Found)
+	{
+		// Already answered, timed out, or never issued by this view.
+		return false;
+	}
+
+	FUXWebviewBridgeReply Reply = MoveTemp(*Found);
+	PendingScriptReplies.Remove(RequestId);
+	if (Reply)
+	{
+		Reply(bSuccess, ResultJson);
+	}
+	return true;
+}
+
 FUXWebviewResult UUXWebview::SendInput(const FUXWebviewInputEvent& Event)
 {
 	const FUXWebviewResult Ready = GuardReady();
@@ -296,4 +315,41 @@ void UUXWebview::OnViewCrash(const FString& Reason)
 	State = EUXWebviewState::Crashed;
 	UE_LOG(LogUXWebview, Warning, TEXT("provider '%s' crashed: %s"), *ProviderName, *Reason);
 	OnCrashed.Broadcast(Reason);
+}
+
+void UUXWebview::OnViewScriptMessage(const FString& Name, const FString& PayloadJson,
+	int32 RequestId, FUXWebviewBridgeReply Reply)
+{
+	if (State == EUXWebviewState::Destroyed)
+	{
+		if (Reply)
+		{
+			Reply(false, TEXT("webview is destroyed"));
+		}
+		return;
+	}
+
+	PendingScriptReplies.Add(RequestId, MoveTemp(Reply));
+
+	// Nobody listening means the page should fail fast instead of waiting for
+	// the provider timeout.
+	if (!OnScriptMessage.IsBound())
+	{
+		RespondToScriptMessage(RequestId, false, TEXT("no script message handler"));
+		return;
+	}
+
+	OnScriptMessage.Broadcast(Name, PayloadJson, RequestId);
+}
+
+void UUXWebview::FailPendingScriptReplies(const FString& Reason)
+{
+	for (TPair<int32, FUXWebviewBridgeReply>& Pair : PendingScriptReplies)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value(false, Reason);
+		}
+	}
+	PendingScriptReplies.Reset();
 }

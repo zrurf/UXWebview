@@ -7,6 +7,8 @@
 class UTexture2D;
 
 using FUXWebviewScriptCallback = TFunction<void(bool bSuccess, const FString& ResultJson)>;
+/** Answers a page query; ResultJson is a JSON text handed to the JS promise. */
+using FUXWebviewBridgeReply = TFunction<void(bool bSuccess, const FString& ResultJson)>;
 
 /**
  * Receives provider callbacks. Every callback is delivered on the game thread.
@@ -21,6 +23,19 @@ public:
 	virtual void OnViewLoadCompleted(const FString& Url) = 0;
 	virtual void OnViewFrame(int32 Width, int32 Height) = 0;
 	virtual void OnViewCrash(const FString& Reason) = 0;
+
+	/**
+	 * A page called window.uxwv.call/emit. Reply exactly once, or let the
+	 * provider time out; the default implementation rejects the query.
+	 */
+	virtual void OnViewScriptMessage(const FString& Name, const FString& PayloadJson,
+		int32 RequestId, FUXWebviewBridgeReply Reply)
+	{
+		if (Reply)
+		{
+			Reply(false, TEXT("no script message handler"));
+		}
+	}
 };
 
 /**

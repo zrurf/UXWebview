@@ -27,6 +27,9 @@ public:
 	virtual void OnHostCrash(const FString& Reason) = 0;
 	virtual void OnHostRecovered() = 0;
 	virtual void OnHostScriptResult(uint32 RequestId, bool bSuccess, const FString& Result) = 0;
+	/** A page query that needs an answer through ReplyBridge. */
+	virtual void OnHostBridgeMessage(const FString& Name, const FString& PayloadJson,
+		uint32 RequestId) = 0;
 	virtual void OnHostDevTools(const FString& Url) = 0;
 };
 
@@ -70,6 +73,10 @@ public:
 	FUXWebviewResult BeginFrame(uint32 InstanceId);
 	FUXWebviewResult SendInput(uint32 InstanceId, const FUXWebviewInputEvent& Event);
 	FUXWebviewResult ExecuteScript(uint32 InstanceId, uint32 RequestId, const FString& Script);
+	FUXWebviewResult EmitToWeb(uint32 InstanceId, const FString& Event, const FString& PayloadJson);
+	/** Resolves a pending page query; the JS promise settles with this value. */
+	FUXWebviewResult ReplyBridge(uint32 InstanceId, uint32 RequestId, bool bSuccess,
+		const FString& Result);
 	FUXWebviewResult RequestDevTools(uint32 InstanceId);
 
 	/** Shared memory name of the current host generation; empty when unknown. */
