@@ -158,8 +158,11 @@ inline bool UXWebviewDecodeInputEvent(
 	if (OutEvent.TextBytes > 0)
 	{
 		// The bytes were written by FTCHARToUTF8, so interpret them as UTF-8.
-		OutText = FString(UTF8_TO_TCHAR(
-			reinterpret_cast<const char*>(Payload.GetData() + sizeof(UxInputEvent))));
+		// They are not null terminated inside the payload, so terminate a copy
+		// instead of letting the converter read past the message.
+		TArray<uint8> Utf8(Payload.GetData() + sizeof(UxInputEvent), static_cast<int32>(OutEvent.TextBytes));
+		Utf8.Add(0);
+		OutText = FString(UTF8_TO_TCHAR(Utf8.GetData()));
 	}
 	else
 	{
