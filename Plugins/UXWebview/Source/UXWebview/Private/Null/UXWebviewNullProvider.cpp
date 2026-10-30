@@ -245,7 +245,21 @@ FUXWebviewResult FUXWebviewNullProvider::EmitToWeb(const FString& EventName, con
 
 FUXWebviewResult FUXWebviewNullProvider::SendInput(const FUXWebviewInputEvent& Event)
 {
-	return GuardReady();
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		return Ready;
+	}
+
+	// Logs non-move input so a manual sample run can prove the widget reaches the provider.
+	if (Event.Type != EUXWebviewInputType::MouseMove)
+	{
+		UE_LOG(LogUXWebview, Log,
+			TEXT("null input: type=%d pos=(%.1f, %.1f) button=%d wheel=%.2f key=%d"),
+			static_cast<int32>(Event.Type), Event.Position.X, Event.Position.Y,
+			Event.Button, Event.WheelDelta, Event.KeyCode);
+	}
+	return FUXWebviewResult::Ok();
 }
 
 FUXWebviewResult FUXWebviewNullProvider::SetFocus(bool bFocused)
@@ -346,6 +360,9 @@ bool FUXWebviewNullProvider::CreateFrames()
 
 		Mip.BulkData.Unlock();
 		Texture->UpdateResource();
+		// Transient textures are garbage collected unless they are rooted; the
+		// provider keeps only raw pointers because it is a plain C++ object.
+		Texture->AddToRoot();
 		Frames.Add(Texture);
 	}
 
@@ -354,6 +371,13 @@ bool FUXWebviewNullProvider::CreateFrames()
 
 void FUXWebviewNullProvider::ReleaseFrames()
 {
+	for (UTexture2D* Texture : Frames)
+	{
+		if (Texture)
+		{
+			Texture->RemoveFromRoot();
+		}
+	}
 	Frames.Reset();
 	CurrentIndex = 0;
 }

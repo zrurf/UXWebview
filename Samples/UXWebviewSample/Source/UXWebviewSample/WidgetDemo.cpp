@@ -1,0 +1,409 @@
+// Sample-only demo: hosts the UMG widget in the viewport without CEF.
+#include "CoreMinimal.h"
+
+#include "Blueprint/UserWidget.h"
+#include "Containers/Ticker.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformMisc.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "UUXWebview.h"
+#include "UUXWebviewSubsystem.h"
+#include "UUXWebviewWidget.h"
+#include "Widgets/Layout/SBox.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogUXWebviewWidgetDemo, Log, All);
+
+namespace
+{
+TSharedPtr<SWidget> GWidgetDemoRoot;
+TWeakObjectPtr<UUXWebviewWidget> GWidgetDemoWidget;
+TWeakObjectPtr<UUXWebview> GWidgetDemoWebview;
+TWeakObjectPtr<UGameInstance> GWidgetDemoGameInstance;
+FTSTicker::FDelegateHandle GWidgetDemoTicker;
+
+/** Optional second instance used to smoke-test multiple webviews on one host. */
+TSharedPtr<SWidget> GWidgetSecondRoot;
+TWeakObjectPtr<UUXWebview> GWidgetSecondWebview;
+
+void StopWidgetDemo()
+{
+	if (GWidgetDemoTicker.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(GWidgetDemoTicker);
+		GWidgetDemoTicker.Reset();
+	}
+
+	if (GWidgetDemoGameInstance.IsValid())
+	{
+		if (UGameViewportClient* ViewportClient = GWidgetDemoGameInstance->GetGameViewportClient())
+		{
+			if (GWidgetSecondRoot.IsValid())
+			{
+				ViewportClient->RemoveViewportWidgetContent(GWidgetSecondRoot.ToSharedRef());
+			}
+			if (GWidgetDemoRoot.IsValid())
+			{
+				ViewportClient->RemoveViewportWidgetContent(GWidgetDemoRoot.ToSharedRef());
+			}
+		}
+	}
+	GWidgetSecondRoot.Reset();
+	GWidgetDemoRoot.Reset();
+	GWidgetDemoWidget.Reset();
+
+	if (GWidgetDemoGameInstance.IsValid())
+	{
+		if (UUXWebviewSubsystem* Subsystem = GWidgetDemoGameInstance->GetSubsystem<UUXWebviewSubsystem>())
+		{
+			if (GWidgetSecondWebview.IsValid())
+			{
+				Subsystem->DestroyWebview(GWidgetSecondWebview.Get());
+			}
+			if (GWidgetDemoWebview.IsValid())
+			{
+				Subsystem->DestroyWebview(GWidgetDemoWebview.Get());
+			}
+		}
+	}
+	GWidgetSecondWebview.Reset();
+	GWidgetDemoWebview.Reset();
+	GWidgetDemoGameInstance.Reset();
+}
+
+void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
+{
+	if (GWidgetDemoRoot.IsValid())
+	{
+		StopWidgetDemo();
+	}
+
+	UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+	UGameViewportClient* ViewportClient = GameInstance ? GameInstance->GetGameViewportClient() : nullptr;
+	UUXWebviewSubsystem* Subsystem = GameInstance ? GameInstance->GetSubsystem<UUXWebviewSubsystem>() : nullptr;
+	if (!ViewportClient || !Subsystem)
+	{
+		UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget demo needs a running game instance"));
+		return;
+	}
+
+	const float Dpi = Args.Num() > 0 ? FMath::Clamp(FCString::Atof(*Args[0]), 0.5f, 4.0f) : 1.0f;
+	const float Seconds = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.0f;
+	const FString Provider = Args.Num() > 2 && !Args[2].IsEmpty() ? Args[2] : FString(TEXT("Null"));
+	const FString Url = Args.Num() > 3 ? Args[3] : FString();
+	const int32 FrameRate = Args.Num() > 4 ? FCString::Atoi(*Args[4]) : 30;
+	const int32 Width = 512;
+	const int32 Height = 288;
+
+	FUXWebviewCreateParams Params;
+	Params.ProviderName = Provider;
+	Params.ViewportSize = FIntPoint(
+		FMath::RoundToInt(Width * Dpi),
+		FMath::RoundToInt(Height * Dpi));
+	Params.DpiScale = Dpi;
+	Params.TargetFrameRate = FrameRate;
+	Params.InitialUrl = Url;
+
+	FUXWebviewResult Result;
+	UUXWebview* Webview = Subsystem->CreateWebview(Params, Result);
+	if (!Webview)
+	{
+		UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget demo failed: %s"), *Result.Message);
+		return;
+	}
+
+	UUXWebviewWidget* Widget = CreateWidget<UUXWebviewWidget>(GameInstance);
+	if (!Widget)
+	{
+		Subsystem->DestroyWebview(Webview);
+		UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget demo could not create the UMG widget"));
+		return;
+	}
+
+	Widget->SetWebView(Webview);
+	Widget->SetDpiScale(Dpi);
+	Widget->SetInteractable(true);
+
+	GWidgetDemoWebview = Webview;
+	GWidgetDemoGameInstance = GameInstance;
+	GWidgetDemoWidget = Widget;
+
+	GWidgetDemoRoot = SNew(SBox)
+		.WidthOverride(static_cast<float>(Width))
+		.HeightOverride(static_cast<float>(Height))
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		[
+			Widget->TakeWidget()
+		];
+	ViewportClient->AddViewportWidgetContent(GWidgetDemoRoot.ToSharedRef(), 10);
+
+	const FString UrlDisplay = Url.IsEmpty() ? FString(TEXT("(default)")) : Url;
+	UE_LOG(LogUXWebviewWidgetDemo, Log,
+		TEXT("widget demo started: provider=%s url=%s %dx%d dpi=%.2f viewport=%dx%d fps=%d; click inside to send input"),
+		*Provider, *UrlDisplay,
+		Width, Height, Dpi, Params.ViewportSize.X, Params.ViewportSize.Y, FrameRate);
+
+	if (Seconds > 0.0f)
+	{
+		TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
+		GWidgetDemoTicker = FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda([Elapsed, Seconds](float DeltaSeconds)
+		{
+			*Elapsed += DeltaSeconds;
+			if (*Elapsed < Seconds)
+			{
+				return true;
+			}
+
+			StopWidgetDemo();
+			if (!GIsEditor)
+			{
+				FPlatformMisc::RequestExit(false);
+			}
+			return false;
+		}));
+	}
+}
+
+void StopWidgetDemoCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)Args;
+	(void)World;
+	StopWidgetDemo();
+	UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("widget demo stopped"));
+}
+
+/** Injects a click at CSS coordinates after a delay so a smoke page has time to load. */
+void ProbeClickCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float X = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 256.0f;
+	const float Y = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 192.0f;
+	const float Delay = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 2.0f;
+
+	TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
+	TWeakObjectPtr<UUXWebview> WeakView = GWidgetDemoWebview;
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([Elapsed, WeakView, X, Y, Delay](float DeltaSeconds) -> bool
+		{
+			*Elapsed += DeltaSeconds;
+			if (*Elapsed < Delay)
+			{
+				return true;
+			}
+
+			UUXWebview* View = WeakView.Get();
+			if (!View)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget probe lost the webview"));
+				return false;
+			}
+
+			FUXWebviewInputEvent Event;
+			Event.Position = FVector2D(X, Y);
+
+			Event.Type = EUXWebviewInputType::MouseMove;
+			View->SendInput(Event);
+			Event.Type = EUXWebviewInputType::MouseDown;
+			Event.Button = 0;
+			View->SendInput(Event);
+			Event.Type = EUXWebviewInputType::MouseUp;
+			View->SendInput(Event);
+
+			UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("widget probe clicked (%.0f, %.0f)"), X, Y);
+			return false;
+		}));
+}
+
+/** Runs a demo action after a delay so chained console commands can be sequenced. */
+void ScheduleViewAction(float Delay, const FString& Label, TFunction<void(UUXWebview*)> Action)
+{
+	TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
+	TWeakObjectPtr<UUXWebview> WeakView = GWidgetDemoWebview;
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([Elapsed, WeakView, Delay, Label, Action](float DeltaSeconds) -> bool
+		{
+			*Elapsed += DeltaSeconds;
+			if (*Elapsed < Delay)
+			{
+				return true;
+			}
+
+			UUXWebview* View = WeakView.Get();
+			if (!View)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget demo lost the webview"));
+				return false;
+			}
+
+			Action(View);
+			UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("widget demo %s"), *Label);
+			return false;
+		}));
+}
+
+void NavigateCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 2.0f;
+	const FString Url = Args.Num() > 1 ? Args[1] : FString();
+	if (Url.IsEmpty())
+	{
+		UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget navigate needs a url"));
+		return;
+	}
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("navigate to %s"), *Url),
+		[Url](UUXWebview* View) { View->LoadURL(Url); });
+}
+
+void ReloadCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 2.0f;
+	ScheduleViewAction(Delay, TEXT("reload"), [](UUXWebview* View) { View->Reload(); });
+}
+
+void LoadHtmlCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 2.0f;
+	const FString FilePath = Args.Num() > 1
+		? FPaths::ConvertRelativePathToFull(Args[1])
+		: FString();
+	if (FilePath.IsEmpty())
+	{
+		UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget load html needs a file path"));
+		return;
+	}
+
+	FString Html;
+	if (!FFileHelper::LoadFileToString(Html, *FilePath))
+	{
+		UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("widget load html could not read %s"), *FilePath);
+		return;
+	}
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("load html from %s"), *FilePath),
+		[Html, FilePath](UUXWebview* View) { View->LoadHTML(Html, FilePath); });
+}
+
+/** Adds a second webview on the same host so multi-instance routing can be smoke-tested. */
+void SecondViewCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 2.0f;
+	const FString Url = Args.Num() > 1 ? Args[1] : FString(TEXT("http://example.com/"));
+	const int32 FrameRate = Args.Num() > 2 ? FCString::Atoi(*Args[2]) : 30;
+	if (GWidgetSecondWebview.IsValid())
+	{
+		UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("second view already exists"));
+		return;
+	}
+
+	TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
+	TWeakObjectPtr<UGameInstance> WeakGameInstance = GWidgetDemoGameInstance;
+	TWeakObjectPtr<UUXWebview> WeakPrimary = GWidgetDemoWebview;
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([Elapsed, WeakGameInstance, WeakPrimary, Delay, Url, FrameRate](float DeltaSeconds) -> bool
+		{
+			*Elapsed += DeltaSeconds;
+			if (*Elapsed < Delay)
+			{
+				return true;
+			}
+
+			UGameInstance* GameInstance = WeakGameInstance.Get();
+			UUXWebviewSubsystem* Subsystem = GameInstance
+				? GameInstance->GetSubsystem<UUXWebviewSubsystem>()
+				: nullptr;
+			UGameViewportClient* ViewportClient = GameInstance
+				? GameInstance->GetGameViewportClient()
+				: nullptr;
+			if (!Subsystem || !ViewportClient)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("second view needs the running demo"));
+				return false;
+			}
+
+			UUXWebview* Primary = WeakPrimary.Get();
+			FUXWebviewCreateParams Params;
+			Params.ProviderName = Primary ? Primary->GetProviderName() : FString(TEXT("CEF"));
+			Params.ViewportSize = FIntPoint(256, 144);
+			Params.DpiScale = 1.0f;
+			Params.TargetFrameRate = FrameRate;
+			Params.InitialUrl = Url;
+
+			FUXWebviewResult Result;
+			UUXWebview* Second = Subsystem->CreateWebview(Params, Result);
+			if (!Second)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Warning,
+					TEXT("second view failed: %s"), *Result.Message);
+				return false;
+			}
+
+			UUXWebviewWidget* SecondWidget = CreateWidget<UUXWebviewWidget>(GameInstance);
+			if (SecondWidget)
+			{
+				SecondWidget->SetWebView(Second);
+				SecondWidget->SetInteractable(true);
+				GWidgetSecondRoot = SNew(SBox)
+					.WidthOverride(256.0f)
+					.HeightOverride(144.0f)
+					.Padding(FMargin(16.0f))
+					.HAlign(HAlign_Right)
+					.VAlign(VAlign_Bottom)
+					[
+						SecondWidget->TakeWidget()
+					];
+				ViewportClient->AddViewportWidgetContent(GWidgetSecondRoot.ToSharedRef(), 11);
+			}
+
+			GWidgetSecondWebview = Second;
+			UE_LOG(LogUXWebviewWidgetDemo, Log,
+				TEXT("second view created: provider=%s url=%s 256x144"),
+				*Params.ProviderName, *Url);
+			return false;
+		}));
+}
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetDemoCommand(
+	TEXT("UXWebviewSample.WidgetDemo"),
+	TEXT("UXWebviewSample.WidgetDemo [dpi] [seconds] [provider] [url] [fps] - hosts the UMG webview widget in the viewport"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&StartWidgetDemo));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetProbeCommand(
+	TEXT("UXWebviewSample.WidgetProbe"),
+	TEXT("UXWebviewSample.WidgetProbe [cssX] [cssY] [delay] - clicks the running demo after a delay"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ProbeClickCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetNavigateCommand(
+	TEXT("UXWebviewSample.WidgetNavigate"),
+	TEXT("UXWebviewSample.WidgetNavigate [delay] [url] - navigates the running demo"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&NavigateCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetReloadCommand(
+	TEXT("UXWebviewSample.WidgetReload"),
+	TEXT("UXWebviewSample.WidgetReload [delay] - reloads the running demo"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ReloadCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetLoadHtmlCommand(
+	TEXT("UXWebviewSample.WidgetLoadHtml"),
+	TEXT("UXWebviewSample.WidgetLoadHtml [delay] [file] - loads the file content through LoadHTML"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&LoadHtmlCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetSecondViewCommand(
+	TEXT("UXWebviewSample.WidgetSecond"),
+	TEXT("UXWebviewSample.WidgetSecond [delay] [url] [fps] - adds a second webview next to the demo"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SecondViewCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetDemoStopCommand(
+	TEXT("UXWebviewSample.WidgetStop"),
+	TEXT("Stops the UMG widget demo"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&StopWidgetDemoCommand));
+} // namespace

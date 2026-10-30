@@ -44,6 +44,7 @@ add_executable(UXWebviewHost
 	src/main.cpp
 	src/app/HostApp.cpp
 	src/browser/BrowserClient.cpp
+	src/browser/BrowserManager.cpp
 	src/frame/FramePublisher.cpp
 	src/ipc/IpcServer.cpp
 	src/util/Log.cpp

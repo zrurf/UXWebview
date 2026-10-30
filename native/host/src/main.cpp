@@ -8,7 +8,6 @@
 #endif
 
 #include "cef_app.h"
-#include "cef_browser_process_handler.h"
 
 #include "app/HostApp.h"
 #include "app/HostOptions.h"
@@ -16,6 +15,22 @@
 
 namespace
 {
+cef_log_severity_t MapLogSeverity(uxwv::LogLevel level)
+{
+	switch (level)
+	{
+	case uxwv::LogLevel::Error:
+		return LOGSEVERITY_ERROR;
+	case uxwv::LogLevel::Warning:
+		return LOGSEVERITY_WARNING;
+	case uxwv::LogLevel::Info:
+		return LOGSEVERITY_INFO;
+	case uxwv::LogLevel::Debug:
+		return LOGSEVERITY_DEBUG;
+	}
+	return LOGSEVERITY_INFO;
+}
+
 bool StartsWith(const std::string& value, const char* prefix)
 {
 	return value.rfind(prefix, 0) == 0;
@@ -40,26 +55,6 @@ int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 		{
 			options.IpcName = nextValue("--ipc");
 		}
-		else if (arg == "--shmem")
-		{
-			options.SharedMemoryName = nextValue("--shmem");
-		}
-		else if (arg == "--url")
-		{
-			options.Url = nextValue("--url");
-		}
-		else if (arg == "--width")
-		{
-			options.Width = atoi(nextValue("--width").c_str());
-		}
-		else if (arg == "--height")
-		{
-			options.Height = atoi(nextValue("--height").c_str());
-		}
-		else if (arg == "--fps")
-		{
-			options.FrameRate = atoi(nextValue("--fps").c_str());
-		}
 		else if (arg == "--cache")
 		{
 			options.CacheDir = nextValue("--cache");
@@ -72,6 +67,10 @@ int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 		{
 			options.Level = static_cast<uxwv::LogLevel>(atoi(nextValue("--log-level").c_str()));
 		}
+		else if (arg == "--locale")
+		{
+			options.Locale = nextValue("--locale");
+		}
 		else if (arg == "--luid")
 		{
 			const std::string value = nextValue("--luid");
@@ -80,6 +79,14 @@ int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 		else if (arg == "--owner-pid")
 		{
 			options.OwnerPid = static_cast<uint32_t>(strtoul(nextValue("--owner-pid").c_str(), nullptr, 10));
+		}
+		else if (arg == "--devtools-port")
+		{
+			options.DevToolsPort = atoi(nextValue("--devtools-port").c_str());
+		}
+		else if (arg == "--idle-seconds")
+		{
+			options.IdleSeconds = atoi(nextValue("--idle-seconds").c_str());
 		}
 		else if (arg == "--no-sandbox")
 		{
@@ -95,28 +102,18 @@ int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 		}
 	}
 
-	if (options.IpcName.empty() || options.SharedMemoryName.empty())
+	if (options.IpcName.empty())
 	{
-		UXWV_LOG_ERROR("both --ipc and --shmem are required");
+		UXWV_LOG_ERROR("--ipc is required");
 		return 1;
 	}
-	if (options.Width <= 0 || options.Height <= 0)
+	if (options.OwnerPid == 0)
 	{
-		UXWV_LOG_ERROR("invalid view size %dx%d", options.Width, options.Height);
-		return 1;
+		UXWV_LOG_WARN("no --owner-pid, the host cannot detect that the game exited");
 	}
 	return 0;
 }
 
-cef_log_severity_t MapLogSeverity(uxwv::LogLevel level)
-{
-	switch (level)
-	{
-	case uxwv::LogLevel::Debug: return LOGSEVERITY_INFO;
-	case uxwv::LogLevel::Info: return LOGSEVERITY_WARNING;
-	default: return LOGSEVERITY_ERROR;
-	}
-}
 } // namespace
 
 int main(int argc, char** argv)
@@ -159,16 +156,27 @@ int main(int argc, char** argv)
 	settings.multi_threaded_message_loop = false;
 	settings.log_severity = MapLogSeverity(options.Level);
 	settings.external_message_pump = false;
+	if (!options.LogPath.empty())
+	{
+		CefString(&settings.log_file) = options.LogPath + ".cef.log";
+	}
+	if (!options.Locale.empty())
+	{
+		CefString(&settings.locale) = options.Locale;
+	}
 	CefString(&settings.root_cache_path) = options.CacheDir;
 	CefString(&settings.cache_path) = options.CacheDir;
 
+	UXWV_LOG_INFO("CefInitialize starting");
 	if (!CefInitialize(mainArgs, settings, app, nullptr))
 	{
 		UXWV_LOG_ERROR("CefInitialize failed");
 		uxwv::LogShutdown();
 		return 1;
 	}
+	UXWV_LOG_INFO("CefInitialize done");
 
+	UXWV_LOG_INFO("message loop starting");
 	CefRunMessageLoop();
 
 	app->StopInfrastructure();

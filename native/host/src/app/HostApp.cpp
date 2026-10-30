@@ -1,12 +1,16 @@
 #include "app/HostApp.h"
 
-#include <vector>
+#include <chrono>
+#include <cstring>
 
-#include "cef_browser.h"
-#include "cef_command_line.h"
+#include "cef_parser.h"
 #include "cef_task.h"
+#include "cef_values.h"
 
-#include "browser/BrowserClient.h"
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
+
 #include "ipc/IpcServer.h"
 #include "util/Log.h"
 
@@ -14,6 +18,38 @@ namespace uxwv
 {
 namespace
 {
+double NowSeconds()
+{
+	return std::chrono::duration<double>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+class IpcTask : public CefTask
+{
+public:
+	IpcTask(CefRefPtr<HostApp> owner, const UxIpcMessage& message,
+		const std::vector<uint8_t>& payload)
+		: Owner(owner), Message(message), Payload(payload)
+	{
+	}
+
+	void Execute() override
+	{
+		UXWV_LOG_DEBUG("IPC task executing type %u", Message.Type);
+		if (Owner)
+		{
+			Owner->ProcessMessage(Message, Payload);
+		}
+	}
+
+private:
+	CefRefPtr<HostApp> Owner;
+	UxIpcMessage Message;
+	std::vector<uint8_t> Payload;
+
+	IMPLEMENT_REFCOUNTING(IpcTask);
+};
+
 class QuitTask : public CefTask
 {
 public:
@@ -22,27 +58,97 @@ public:
 	IMPLEMENT_REFCOUNTING(QuitTask);
 };
 
-class BeginFrameTask : public CefTask
+class IdleTask : public CefTask
 {
 public:
-	explicit BeginFrameTask(CefRefPtr<HostApp> owner) : Owner(owner) {}
+	explicit IdleTask(CefRefPtr<HostApp> owner) : Owner(owner) {}
 
 	void Execute() override
 	{
 		if (Owner)
 		{
-			Owner->SendBeginFrame();
+			Owner->CheckIdle();
 		}
 	}
 
 private:
 	CefRefPtr<HostApp> Owner;
 
-	IMPLEMENT_REFCOUNTING(BeginFrameTask);
+	IMPLEMENT_REFCOUNTING(IdleTask);
 };
+
+CefRefPtr<CefDictionaryValue> ParsePayload(const std::vector<uint8_t>& payload)
+{
+	if (payload.empty())
+	{
+		return nullptr;
+	}
+
+	CefRefPtr<CefValue> root =
+		CefParseJSON(payload.data(), payload.size(), JSON_PARSER_RFC);
+	if (!root || root->GetType() != VTYPE_DICTIONARY)
+	{
+		return nullptr;
+	}
+	return root->GetDictionary();
+}
+
+std::string GetString(const CefRefPtr<CefDictionaryValue>& dict, const char* key)
+{
+	if (!dict || !dict->HasKey(key))
+	{
+		return std::string();
+	}
+	return dict->GetString(key).ToString();
+}
+
+int GetInt(const CefRefPtr<CefDictionaryValue>& dict, const char* key, int fallback)
+{
+	if (!dict || !dict->HasKey(key))
+	{
+		return fallback;
+	}
+	return dict->GetInt(key);
+}
+
+bool GetBool(const CefRefPtr<CefDictionaryValue>& dict, const char* key, bool fallback)
+{
+	if (!dict || !dict->HasKey(key))
+	{
+		return fallback;
+	}
+	return dict->GetBool(key);
+}
+
+bool ParseInput(const std::vector<uint8_t>& payload, UxInputEvent& event, std::string& text)
+{
+	if (payload.size() < sizeof(UxInputEvent))
+	{
+		return false;
+	}
+
+	std::memcpy(&event, payload.data(), sizeof(UxInputEvent));
+	const size_t available = payload.size() - sizeof(UxInputEvent);
+	if (event.TextBytes > available || event.TextBytes > UXWV_IPC_MAX_INPUT_TEXT)
+	{
+		return false;
+	}
+	if (event.TextBytes > 0)
+	{
+		text.assign(reinterpret_cast<const char*>(payload.data() + sizeof(UxInputEvent)),
+			event.TextBytes);
+	}
+	return true;
+}
 } // namespace
 
-HostApp::HostApp(HostOptions options) : Options(std::move(options))
+HostApp::HostApp(HostOptions options)
+	: Options(std::move(options))
+	, Manager(Options.AdapterLuid, Options.OwnerPid,
+		[this](uint32_t instanceId, uint32_t type, const std::string& json)
+		{
+			SendEvent(instanceId, type, json);
+		})
 {
 }
 
@@ -53,28 +159,25 @@ HostApp::~HostApp()
 
 bool HostApp::StartInfrastructure()
 {
-	if (!Publisher.Start(Options.SharedMemoryName, Options.AdapterLuid, Options.OwnerPid))
+	EmptySinceSeconds = NowSeconds();
+	LastIdleCheckSeconds = EmptySinceSeconds;
+
+	Ipc = std::make_unique<IpcServer>(
+		Options.IpcName,
+		[this](const UxIpcMessage& message, const std::vector<uint8_t>& payload)
+		{
+			OnIpcMessage(message, payload);
+		},
+		[this]()
+		{
+			UXWV_LOG_WARN("IPC client disconnected, shutting down");
+			CefPostTask(TID_UI, new QuitTask());
+		});
+
+	if (!Ipc->Start())
 	{
 		return false;
 	}
-
-	if (!Options.IpcName.empty())
-	{
-		Ipc = std::make_unique<IpcServer>(
-			Options.IpcName,
-			[this](const UxIpcMessage& message) { HandleIpcMessage(message); },
-			[this]()
-			{
-				UXWV_LOG_WARN("IPC client disconnected");
-				Shutdown();
-			});
-
-		if (!Ipc->Start())
-		{
-			return false;
-		}
-	}
-
 	return true;
 }
 
@@ -85,101 +188,329 @@ void HostApp::StopInfrastructure()
 		Ipc->Stop();
 		Ipc.reset();
 	}
-	Publisher.Stop();
+	Manager.ShutdownAll();
 }
 
 void HostApp::OnBeforeCommandLineProcessing(const CefString& processType,
 	CefRefPtr<CefCommandLine> commandLine)
 {
-	// Background throttling would starve the page when the game is busy.
+	// Background throttling would starve pages while the game is busy.
 	commandLine->AppendSwitch("disable-background-timer-throttling");
 	commandLine->AppendSwitch("disable-renderer-backgrounding");
 	commandLine->AppendSwitch("disable-backgrounding-occluded-windows");
+	commandLine->AppendSwitch("enable-begin-frame-control");
 
-	if (Options.FrameRate > 0)
+	if (Options.DevToolsPort > 0)
 	{
-		commandLine->AppendSwitch("enable-begin-frame-control");
+		commandLine->AppendSwitchWithValue("remote-debugging-port",
+			std::to_string(Options.DevToolsPort));
 	}
 }
 
 void HostApp::OnContextInitialized()
 {
-	CreateBrowser();
+	UXWV_LOG_INFO("CEF context initialized");
+	FlushPendingMessages();
+	ScheduleIdleCheck();
 }
 
-void HostApp::CreateBrowser()
+void HostApp::OnIpcMessage(const UxIpcMessage& message, const std::vector<uint8_t>& payload)
 {
-	Client = new BrowserClient(
-		&Publisher, Options.Width, Options.Height,
-		[this](CefRefPtr<CefBrowser> browser) { Browser = browser; });
-
-	CefWindowInfo windowInfo;
-	windowInfo.SetAsWindowless(nullptr);
-	windowInfo.shared_texture_enabled = true;
-	windowInfo.external_begin_frame_enabled = Options.FrameRate > 0;
-
-	CefBrowserSettings browserSettings;
-	browserSettings.windowless_frame_rate = Options.FrameRate > 0 ? Options.FrameRate : 60;
-
-	UXWV_LOG_INFO("creating browser %dx%d url='%s' fps=%d",
-		Options.Width, Options.Height, Options.Url.c_str(), Options.FrameRate);
-
-	CefBrowserHost::CreateBrowser(
-		windowInfo, Client, Options.Url, browserSettings, nullptr, nullptr);
-}
-
-void HostApp::SendBeginFrame()
-{
-	if (Browser && Browser->GetHost())
+	std::lock_guard<std::mutex> Lock(PendingMutex);
+	UXWV_LOG_DEBUG("IPC dispatch type %u (context ready=%d)", message.Type,
+		bContextReady ? 1 : 0);
+	if (!bContextReady)
 	{
-		Browser->GetHost()->SendExternalBeginFrame();
+		PendingMessages.emplace_back(message, payload);
+		return;
+	}
+
+	CefPostTask(TID_UI, new IpcTask(this, message, payload));
+}
+
+void HostApp::FlushPendingMessages()
+{
+	std::vector<std::pair<UxIpcMessage, std::vector<uint8_t>>> pending;
+	{
+		std::lock_guard<std::mutex> Lock(PendingMutex);
+		pending.swap(PendingMessages);
+		bContextReady = true;
+	}
+
+	for (const auto& entry : pending)
+	{
+		ProcessMessage(entry.first, entry.second);
 	}
 }
 
-void HostApp::HandleIpcMessage(const UxIpcMessage& message)
+void HostApp::ProcessMessage(const UxIpcMessage& message, const std::vector<uint8_t>& payload)
 {
 	switch (message.Type)
 	{
 	case UXWV_IPC_HELLO:
 	{
-		UxIpcMessage reply{};
-		reply.Type = UXWV_IPC_HELLO_ACK;
-		reply.ProtocolVersion = UXWV_IPC_VERSION;
-		reply.Value = UXWV_IPC_VERSION;
-		reply.RequestId = message.RequestId;
-		if (Ipc)
-		{
-			Ipc->Send(reply);
-		}
-		UXWV_LOG_INFO("IPC hello received");
+		SendMessage(UXWV_IPC_HELLO_ACK, 0, message.RequestId,
+			UXWV_IPC_VERSION, 0, UXWV_IPC_FLAG_RESPONSE, "{}");
+		UXWV_LOG_INFO("client hello accepted");
 		break;
 	}
 	case UXWV_IPC_CREATE:
+	{
+		HandleCreate(message, payload);
+		break;
+	}
+	case UXWV_IPC_DESTROY:
+	{
+		UXWV_LOG_INFO("instance %u: destroy requested", message.Instance);
+		Manager.Destroy(message.Instance);
+		break;
+	}
+	case UXWV_IPC_NAVIGATE:
+	{
+		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+		if (dict)
+		{
+			Manager.Navigate(message.Instance, GetString(dict, "url"));
+		}
+		break;
+	}
+	case UXWV_IPC_LOAD_HTML:
+	{
+		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+		if (dict)
+		{
+			Manager.LoadHtml(message.Instance,
+				GetString(dict, "html"), GetString(dict, "base"));
+		}
+		break;
+	}
+	case UXWV_IPC_RELOAD:
+	{
+		Manager.Reload(message.Instance);
+		break;
+	}
+	case UXWV_IPC_STOP:
+	{
+		Manager.StopLoading(message.Instance);
+		break;
+	}
 	case UXWV_IPC_RESIZE:
-		if (Client)
-		{
-			Client->SetViewSize(static_cast<int>(message.A), static_cast<int>(message.B));
-		}
-		if (Browser && Browser->GetHost())
-		{
-			Browser->GetHost()->WasResized();
-		}
+	{
+		Manager.Resize(message.Instance, static_cast<int>(message.A), static_cast<int>(message.B));
 		break;
+	}
+	case UXWV_IPC_SET_VISIBLE:
+	{
+		Manager.SetVisible(message.Instance, message.A != 0);
+		break;
+	}
+	case UXWV_IPC_SET_FRAME_RATE:
+	{
+		Manager.SetFrameRate(message.Instance, static_cast<int>(message.A));
+		break;
+	}
+	case UXWV_IPC_FOCUS:
+	{
+		Manager.Focus(message.Instance, message.A != 0);
+		break;
+	}
 	case UXWV_IPC_BEGIN_FRAME:
-		// Called from the IPC thread; forward to the UI thread.
-		CefPostTask(TID_UI, new BeginFrameTask(this));
+	{
+		Manager.BeginFrame(message.Instance);
 		break;
+	}
+	case UXWV_IPC_INPUT:
+	{
+		HandleInput(message, payload);
+		break;
+	}
+	case UXWV_IPC_EXEC:
+	{
+		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+		if (dict)
+		{
+			Manager.ExecuteScript(message.Instance, message.RequestId,
+				GetString(dict, "script"));
+		}
+		break;
+	}
+	case UXWV_IPC_REQUEST_DEVTOOLS:
+	{
+		const std::string url = Options.DevToolsPort > 0
+			? "http://127.0.0.1:" + std::to_string(Options.DevToolsPort)
+			: std::string();
+		CefRefPtr<CefDictionaryValue> dict = CefDictionaryValue::Create();
+		dict->SetString("url", url);
+		CefRefPtr<CefValue> root = CefValue::Create();
+		root->SetDictionary(dict);
+		SendEvent(message.Instance, UXWV_IPC_EVENT_DEVTOOLS,
+			CefWriteJSON(root, JSON_WRITER_DEFAULT).ToString());
+		break;
+	}
+	case UXWV_IPC_PING:
+	{
+		SendMessage(UXWV_IPC_PONG, 0, message.RequestId, 0, 0,
+			UXWV_IPC_FLAG_RESPONSE, "{}");
+		break;
+	}
 	case UXWV_IPC_SHUTDOWN:
-		Shutdown();
+	{
+		SendMessage(UXWV_IPC_SHUTDOWN_ACK, 0, message.RequestId, 0, 0,
+			UXWV_IPC_FLAG_RESPONSE, "{}");
+		RequestQuit();
 		break;
+	}
 	default:
+	{
 		UXWV_LOG_WARN("unhandled IPC message type %u", message.Type);
 		break;
 	}
+	}
 }
 
-void HostApp::Shutdown()
+void HostApp::HandleCreate(const UxIpcMessage& message, const std::vector<uint8_t>& payload)
 {
+	const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+	if (!dict)
+	{
+		UXWV_LOG_ERROR("instance %u: create without a JSON payload", message.Instance);
+		SendMessage(UXWV_IPC_CREATE_ACK, message.Instance, message.RequestId, 0, 0,
+			UXWV_IPC_FLAG_RESPONSE, "{\"ok\":false}");
+		return;
+	}
+
+	const std::string sharedMemory = GetString(dict, "shmem");
+	const int width = GetInt(dict, "width", 1280);
+	const int height = GetInt(dict, "height", 720);
+	const int frameRate = GetInt(dict, "fps", 60);
+	const bool visible = GetBool(dict, "visible", true);
+	const std::string url = GetString(dict, "url");
+
+	const bool created = Manager.Create(message.Instance, sharedMemory, width, height,
+		url.empty() ? "about:blank" : url, frameRate, visible);
+
+	CefRefPtr<CefDictionaryValue> reply = CefDictionaryValue::Create();
+	reply->SetBool("ok", created);
+	CefRefPtr<CefValue> root = CefValue::Create();
+	root->SetDictionary(reply);
+	SendMessage(UXWV_IPC_CREATE_ACK, message.Instance, message.RequestId,
+		static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+		UXWV_IPC_FLAG_RESPONSE, CefWriteJSON(root, JSON_WRITER_DEFAULT).ToString());
+
+	if (!created)
+	{
+		UXWV_LOG_ERROR("instance %u: create failed", message.Instance);
+	}
+}
+
+void HostApp::HandleInput(const UxIpcMessage& message, const std::vector<uint8_t>& payload)
+{
+	UxInputEvent event{};
+	std::string text;
+	if (!ParseInput(payload, event, text))
+	{
+		UXWV_LOG_WARN("instance %u: malformed input payload", message.Instance);
+		return;
+	}
+	Manager.SendInput(message.Instance, event, text);
+}
+
+void HostApp::SendMessage(uint32_t type, uint32_t instance, uint32_t requestId,
+	uint32_t a, uint32_t b, uint32_t flags, const std::string& payload)
+{
+	if (!Ipc)
+	{
+		return;
+	}
+
+	UxIpcMessage message{};
+	message.Size = static_cast<uint32_t>(payload.size());
+	message.Type = type;
+	message.ProtocolVersion = UXWV_IPC_VERSION;
+	message.Instance = instance;
+	message.RequestId = requestId;
+	message.A = a;
+	message.B = b;
+	message.Flags = flags;
+
+	std::vector<uint8_t> bytes(payload.begin(), payload.end());
+	Ipc->Send(message, bytes);
+}
+
+void HostApp::SendEvent(uint32_t instance, uint32_t type, const std::string& json)
+{
+	SendMessage(type, instance, 0, 0, 0, 0, json);
+}
+
+void HostApp::ScheduleIdleCheck()
+{
+	CefPostDelayedTask(TID_UI, new IdleTask(this), 5000);
+}
+
+void HostApp::CheckIdle()
+{
+	if (bQuitting)
+	{
+		return;
+	}
+
+	const double now = NowSeconds();
+
+	// The game process is the owner; when it disappears the IPC pipe usually
+	// disconnects too, but a suspended game may keep the pipe open.
+	if (Options.OwnerPid != 0 && !IsOwnerAlive())
+	{
+		UXWV_LOG_WARN("owner process %u is gone, shutting down", Options.OwnerPid);
+		RequestQuit();
+		return;
+	}
+
+	if (Manager.Count() == 0)
+	{
+		if (EmptySinceSeconds == 0.0)
+		{
+			EmptySinceSeconds = now;
+		}
+		else if (Options.IdleSeconds > 0 && now - EmptySinceSeconds >= Options.IdleSeconds)
+		{
+			UXWV_LOG_INFO("no webviews for %d seconds, shutting down", Options.IdleSeconds);
+			RequestQuit();
+			return;
+		}
+	}
+	else
+	{
+		EmptySinceSeconds = 0.0;
+	}
+
+	LastIdleCheckSeconds = now;
+	ScheduleIdleCheck();
+}
+
+void HostApp::RequestQuit()
+{
+	if (bQuitting)
+	{
+		return;
+	}
+	bQuitting = true;
+	UXWV_LOG_INFO("host shutting down");
 	CefPostTask(TID_UI, new QuitTask());
+}
+
+bool HostApp::IsOwnerAlive()
+{
+#if defined(_WIN32)
+	HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, Options.OwnerPid);
+	if (!process)
+	{
+		return false;
+	}
+	const bool alive = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+	CloseHandle(process);
+	return alive;
+#else
+	return true;
+#endif
 }
 } // namespace uxwv
