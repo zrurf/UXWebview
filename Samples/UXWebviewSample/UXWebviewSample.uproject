@@ -11,7 +11,7 @@
 		}
 	],
 	"AdditionalPluginDirectories": [
-		"../../"
+		"../../Plugins"
 	],
 	"Plugins": [
 		{

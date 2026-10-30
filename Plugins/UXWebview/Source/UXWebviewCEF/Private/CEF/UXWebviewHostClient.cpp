@@ -298,8 +298,12 @@ bool FUXWebviewHostClient::LaunchHost(double NowSeconds)
 		return false;
 	}
 
-	const FString CacheDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UXWebviewHostCache"));
-	const FString HostLogPath = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Logs/UXWebviewHost.log"));
+	// The host runs in its own process, so hand it absolute paths instead of
+	// paths that depend on which directory the game was started from.
+	const FString CacheDir = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UXWebviewHostCache")));
+	const FString HostLogPath = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Logs/UXWebviewHost.log")));
 	IFileManager::Get().MakeDirectory(*CacheDir, true);
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(HostLogPath), true);
 
