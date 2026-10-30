@@ -11,7 +11,9 @@ public class UXWebviewSample : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"UMG",
 			"UXWebview",
+			"UXWebviewWidget",
 			"Slate",
 			"SlateCore"
 		});
