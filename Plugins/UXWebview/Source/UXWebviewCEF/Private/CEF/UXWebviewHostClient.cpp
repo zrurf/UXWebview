@@ -328,7 +328,10 @@ bool FUXWebviewHostClient::LaunchHost(double NowSeconds)
 	}
 
 	uint32 ProcessId = 0;
-	HostProcess = FPlatformProcess::CreateProc(*HostPath, *Args, true, false, false,
+	// CREATE_NO_WINDOW (really hidden): a detached console app would otherwise
+	// pop a console window that steals focus from the game, which breaks
+	// keyboard input and IME for texture-mode webviews.
+	HostProcess = FPlatformProcess::CreateProc(*HostPath, *Args, true, false, true,
 		&ProcessId, 0, *FPaths::GetPath(HostPath), nullptr, nullptr);
 	if (!HostProcess.IsValid())
 	{

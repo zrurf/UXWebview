@@ -186,7 +186,13 @@ enum class EUXWebviewInputType : uint8
 	MouseWheel,
 	KeyDown,
 	KeyUp,
-	Char
+	Char,
+	/** Interim IME text shown in the page; replaces the previous composition. */
+	ImeComposition,
+	/** Final IME text inserted into the page. */
+	ImeCommit,
+	/** Discards the current IME composition. */
+	ImeCancel
 };
 
 /** Input event routed to the provider. Coordinates are in view CSS pixels. */

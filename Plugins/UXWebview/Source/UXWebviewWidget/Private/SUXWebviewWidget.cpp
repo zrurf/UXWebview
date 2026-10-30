@@ -1,11 +1,14 @@
 #include "SUXWebviewWidget.h"
 
 #include "Engine/Texture2D.h"
+#include "Framework/Application/SlateApplication.h"
+#include "GenericPlatform/ITextInputMethodSystem.h"
 #include "InputCoreTypes.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/SlateBrush.h"
 #include "UUXWebview.h"
 #include "UXWebviewCoordinateMapper.h"
+#include "UXWebviewTextInputContext.h"
 
 void SUXWebviewWidget::Construct(const FArguments& InArgs)
 {
@@ -62,6 +65,12 @@ bool SUXWebviewWidget::IsInteractable() const
 
 void SUXWebviewWidget::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
+	if (TextInputContext.IsValid())
+	{
+		// The IME needs the panel transform for candidate placement.
+		TextInputContext->UpdateCachedGeometry(AllottedGeometry);
+	}
+
 	UUXWebview* View = WebView.Get();
 	if (View && View->IsOverlayMode())
 	{
@@ -187,13 +196,93 @@ FCursorReply SUXWebviewWidget::OnCursorQuery(const FGeometry& MyGeometry, const 
 
 FReply SUXWebviewWidget::OnFocusReceived(const FGeometry& MyGeometry, const FFocusEvent& InFocusEvent)
 {
+	RegisterTextInput();
 	SyncFocus(true);
 	return FReply::Handled();
 }
 
 void SUXWebviewWidget::OnFocusLost(const FFocusEvent& InFocusEvent)
 {
+	UnregisterTextInput();
 	SyncFocus(false);
+}
+
+void SUXWebviewWidget::RegisterTextInput()
+{
+	if (TextInputContext.IsValid() || !bInteractable || !FSlateApplication::IsInitialized())
+	{
+		return;
+	}
+
+	UUXWebview* View = WebView.Get();
+	if (!View)
+	{
+		return;
+	}
+
+	// Overlay browsers are real windows, so Chromium runs its own IME there.
+	if (View->IsOverlayMode())
+	{
+		return;
+	}
+
+	ITextInputMethodSystem* System = FSlateApplication::Get().GetTextInputMethodSystem();
+	if (!System)
+	{
+		return;
+	}
+
+	TextInputContext = MakeShared<FUXWebviewTextInputContext>(TWeakPtr<SUXWebviewWidget>(SharedThis(this)));
+	TextInputNotifier = System->RegisterContext(TextInputContext.ToSharedRef());
+	System->ActivateContext(TextInputContext.ToSharedRef());
+}
+
+void SUXWebviewWidget::UnregisterTextInput()
+{
+	if (!TextInputContext.IsValid())
+	{
+		return;
+	}
+
+	if (TextInputContext->IsComposing())
+	{
+		SendImeCancel();
+	}
+
+	if (FSlateApplication::IsInitialized())
+	{
+		if (ITextInputMethodSystem* System = FSlateApplication::Get().GetTextInputMethodSystem())
+		{
+			System->DeactivateContext(TextInputContext.ToSharedRef());
+			System->UnregisterContext(TextInputContext.ToSharedRef());
+		}
+	}
+
+	TextInputNotifier.Reset();
+	TextInputContext.Reset();
+}
+
+void SUXWebviewWidget::SendImeComposition(const FString& Text)
+{
+	FUXWebviewInputEvent Event;
+	Event.Type = EUXWebviewInputType::ImeComposition;
+	Event.Text = Text;
+	ForwardEvent(Event);
+}
+
+void SUXWebviewWidget::SendImeCommit(const FString& Text)
+{
+	FUXWebviewInputEvent Event;
+	Event.Type = EUXWebviewInputType::ImeCommit;
+	Event.Text = Text;
+	ForwardEvent(Event);
+}
+
+void SUXWebviewWidget::SendImeCancel()
+{
+	FUXWebviewInputEvent Event;
+	Event.Type = EUXWebviewInputType::ImeCancel;
+	ForwardEvent(Event);
 }
 
 void SUXWebviewWidget::SyncFocus(bool bFocused)

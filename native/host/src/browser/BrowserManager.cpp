@@ -513,7 +513,10 @@ void BrowserManager::SendInput(uint32_t id, const UxInputEvent& event, const std
 	CefMouseEvent mouse;
 	mouse.x = static_cast<int>(event.X);
 	mouse.y = static_cast<int>(event.Y);
-	mouse.modifiers = ToCefModifiers(event.Modifiers);
+	mouse.modifiers = ToCefModifiers(event.Modifiers)
+		// Held buttons must ride along on move events, otherwise Chromium
+		// treats a drag as hover and text selection never starts.
+		| static_cast<int>(it->second->PressedButtons);
 
 	switch (event.Type)
 	{
@@ -523,12 +526,22 @@ void BrowserManager::SendInput(uint32_t id, const UxInputEvent& event, const std
 	case UXWV_INPUT_MOUSE_DOWN:
 	case UXWV_INPUT_MOUSE_UP:
 	{
-		// Setting the matching button flag lets the page see the right button.
-		mouse.modifiers |= event.Button == 1 ? EVENTFLAG_RIGHT_MOUSE_BUTTON
+		const uint32_t ButtonFlag = event.Button == 1 ? EVENTFLAG_RIGHT_MOUSE_BUTTON
 			: event.Button == 2 ? EVENTFLAG_MIDDLE_MOUSE_BUTTON
 			: EVENTFLAG_LEFT_MOUSE_BUTTON;
+		// Setting the matching button flag lets the page see the right button.
+		mouse.modifiers |= static_cast<int>(ButtonFlag);
 		host->SendMouseClickEvent(mouse, ToMouseButton(event.Button),
 			event.Type == UXWV_INPUT_MOUSE_UP, 1);
+
+		if (event.Type == UXWV_INPUT_MOUSE_DOWN)
+		{
+			it->second->PressedButtons |= ButtonFlag;
+		}
+		else
+		{
+			it->second->PressedButtons &= ~ButtonFlag;
+		}
 		break;
 	}
 	case UXWV_INPUT_MOUSE_WHEEL:
@@ -558,6 +571,24 @@ void BrowserManager::SendInput(uint32_t id, const UxInputEvent& event, const std
 		host->SendKeyEvent(keyEvent);
 		break;
 	}
+	case UXWV_INPUT_IME_COMPOSITION:
+	{
+		// CefString wraps UTF-8 and the IME API expects UTF-16 code units.
+		const CefString Utf8Text(text);
+		const std::wstring Wide = Utf8Text.ToWString();
+		host->ImeSetComposition(CefString(Wide), {},
+			CefRange(UINT32_MAX, UINT32_MAX), CefRange(0, static_cast<uint32_t>(Wide.size())));
+		break;
+	}
+	case UXWV_INPUT_IME_COMMIT:
+	{
+		const CefString Utf8Text(text);
+		host->ImeCommitText(CefString(Utf8Text.ToWString()), CefRange(UINT32_MAX, UINT32_MAX), 0);
+		break;
+	}
+	case UXWV_INPUT_IME_CANCEL:
+		host->ImeCancelComposition();
+		break;
 	default:
 		break;
 	}

@@ -80,6 +80,8 @@ private:
 		/** Overlay size in physical pixels. */
 		int Width = 0;
 		int Height = 0;
+		/** Mouse buttons currently held, as CEF EVENTFLAG_* bits (drag selection). */
+		uint32_t PressedButtons = 0;
 	};
 
 	void OnBrowserCreated(uint32_t id, CefRefPtr<CefBrowser> browser);

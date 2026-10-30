@@ -8,6 +8,8 @@
 
 class UUXWebview;
 class UTexture2D;
+class FUXWebviewTextInputContext;
+class ITextInputMethodChangeNotifier;
 struct FSlateBrush;
 struct FKey;
 struct FInputEvent;
@@ -58,10 +60,18 @@ public:
 	virtual FReply OnKeyChar(const FGeometry& MyGeometry, const FCharacterEvent& InCharacterEvent) override;
 
 private:
+	friend class FUXWebviewTextInputContext;
+
 	void UpdateViewport(const FGeometry& AllottedGeometry);
 	void UpdateOverlayBounds(const FGeometry& AllottedGeometry, UUXWebview& View);
 	void UpdateBrush();
 	void SyncFocus(bool bFocused);
+	/** IME callbacks; the text input context owns composition state. */
+	void RegisterTextInput();
+	void UnregisterTextInput();
+	void SendImeComposition(const FString& Text);
+	void SendImeCommit(const FString& Text);
+	void SendImeCancel();
 	FVector2D LocalToCss(const FGeometry& Geometry, const FVector2D& LocalPosition) const;
 	void FillModifiers(FUXWebviewInputEvent& Event, const FInputEvent& InputEvent) const;
 	int32 MapButton(const FKey& ButtonKey) const;
@@ -71,6 +81,8 @@ private:
 	TSharedPtr<FSlateBrush> Brush;
 	UTexture2D* LastTexture = nullptr;
 	FUXWebviewInputFilter Filter;
+	TSharedPtr<FUXWebviewTextInputContext> TextInputContext;
+	TSharedPtr<ITextInputMethodChangeNotifier> TextInputNotifier;
 	FIntPoint ViewportSize = FIntPoint::ZeroValue;
 	/** Last rectangle handed to an overlay browser, in window client pixels. */
 	FIntPoint OverlayPosition = FIntPoint::ZeroValue;

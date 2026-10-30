@@ -102,7 +102,10 @@ typedef enum UxInputType
     UXWV_INPUT_MOUSE_WHEEL = 3,
     UXWV_INPUT_KEY_DOWN    = 4,
     UXWV_INPUT_KEY_UP      = 5,
-    UXWV_INPUT_CHAR        = 6
+    UXWV_INPUT_CHAR        = 6,
+    UXWV_INPUT_IME_COMPOSITION = 7, /* UTF-8 interim text replaces the last composition */
+    UXWV_INPUT_IME_COMMIT      = 8, /* UTF-8 text is committed into the page */
+    UXWV_INPUT_IME_CANCEL      = 9  /* drop the current composition */
 } UxInputType;
 
 typedef enum UxInputModifier

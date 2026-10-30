@@ -106,6 +106,9 @@ inline uint32 UXWebviewToWireInputType(EUXWebviewInputType Type)
 	case EUXWebviewInputType::KeyDown: return UXWV_INPUT_KEY_DOWN;
 	case EUXWebviewInputType::KeyUp: return UXWV_INPUT_KEY_UP;
 	case EUXWebviewInputType::Char: return UXWV_INPUT_CHAR;
+	case EUXWebviewInputType::ImeComposition: return UXWV_INPUT_IME_COMPOSITION;
+	case EUXWebviewInputType::ImeCommit: return UXWV_INPUT_IME_COMMIT;
+	case EUXWebviewInputType::ImeCancel: return UXWV_INPUT_IME_CANCEL;
 	default: return UXWV_INPUT_MOUSE_MOVE;
 	}
 }

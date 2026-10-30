@@ -259,6 +259,87 @@ void ProbeClickCommand(const TArray<FString>& Args, UWorld* World)
 }
 
 /** Runs a demo action after a delay so chained console commands can be sequenced. */
+void ScheduleViewAction(float Delay, const FString& Label, TFunction<void(UUXWebview*)> Action);
+
+/** Feeds IME composition, commit or cancel into the running webview. */
+void ImeProbeCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const FString Text = Args.Num() > 0 ? Args[0] : FString(TEXT("ni"));
+	const int32 Mode = Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 0;
+	const float Delay = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 2.0f;
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("ime mode %d '%s'"), Mode, *Text),
+		[Text, Mode](UUXWebview* View)
+		{
+			FUXWebviewInputEvent Event;
+			Event.Text = Text;
+			Event.Type = Mode == 2 ? EUXWebviewInputType::ImeCancel
+				: Mode == 1 ? EUXWebviewInputType::ImeCommit
+				: EUXWebviewInputType::ImeComposition;
+			View->SendInput(Event);
+		});
+}
+
+/** Drags across the page so text selection can be verified without a real mouse. */
+void DragProbeCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float X1 = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 30.0f;
+	const float Y1 = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 40.0f;
+	const float X2 = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 400.0f;
+	const float Y2 = Args.Num() > 3 ? FCString::Atof(*Args[3]) : 40.0f;
+	const float Delay = Args.Num() > 4 ? FCString::Atof(*Args[4]) : 2.0f;
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("drag (%.0f,%.0f)->(%.0f,%.0f)"), X1, Y1, X2, Y2),
+		[X1, Y1, X2, Y2](UUXWebview* View)
+		{
+			FUXWebviewInputEvent Event;
+			Event.Position = FVector2D(X1, Y1);
+			Event.Type = EUXWebviewInputType::MouseMove;
+			View->SendInput(Event);
+			Event.Type = EUXWebviewInputType::MouseDown;
+			Event.Button = 0;
+			View->SendInput(Event);
+
+			// Intermediate moves carry the held button, which is what Chromium
+			// needs to start a selection instead of a hover.
+			for (int32 Step = 1; Step <= 8; ++Step)
+			{
+				const float Alpha = static_cast<float>(Step) / 8.0f;
+				Event.Type = EUXWebviewInputType::MouseMove;
+				Event.Position = FVector2D(X1 + (X2 - X1) * Alpha, Y1 + (Y2 - Y1) * Alpha);
+				View->SendInput(Event);
+			}
+
+			Event.Type = EUXWebviewInputType::MouseUp;
+			Event.Button = 0;
+			View->SendInput(Event);
+		});
+}
+
+/** Sends one key press to the running webview without going through OS focus. */
+void KeyProbeCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const int32 Vk = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 'A';
+	const bool bCtrl = Args.Num() > 1 && FCString::Atoi(*Args[1]) != 0;
+	const float Delay = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 2.0f;
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("key vk=%d ctrl=%d"), Vk, bCtrl ? 1 : 0),
+		[Vk, bCtrl](UUXWebview* View)
+		{
+			FUXWebviewInputEvent Event;
+			Event.KeyCode = Vk;
+			Event.bControl = bCtrl;
+			Event.Type = EUXWebviewInputType::KeyDown;
+			View->SendInput(Event);
+			Event.Type = EUXWebviewInputType::KeyUp;
+			View->SendInput(Event);
+		});
+}
+
+/** Runs a demo action after a delay so chained console commands can be sequenced. */
 void ScheduleViewAction(float Delay, const FString& Label, TFunction<void(UUXWebview*)> Action)
 {
 	TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
@@ -523,6 +604,21 @@ FAutoConsoleCommandWithWorldAndArgs GWidgetProbeCommand(
 	TEXT("UXWebviewSample.WidgetProbe"),
 	TEXT("UXWebviewSample.WidgetProbe [cssX] [cssY] [delay] - clicks the running demo after a delay"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ProbeClickCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetImeCommand(
+	TEXT("UXWebviewSample.WidgetIme"),
+	TEXT("UXWebviewSample.WidgetIme [text] [mode] [delay] - feeds IME composition(0)/commit(1)/cancel(2)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ImeProbeCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetKeyCommand(
+	TEXT("UXWebviewSample.WidgetKey"),
+	TEXT("UXWebviewSample.WidgetKey [vk] [ctrl] [delay] - presses one key in the running demo"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&KeyProbeCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetDragCommand(
+	TEXT("UXWebviewSample.WidgetDrag"),
+	TEXT("UXWebviewSample.WidgetDrag [x1] [y1] [x2] [y2] [delay] - drags across the page"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DragProbeCommand));
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetNavigateCommand(
 	TEXT("UXWebviewSample.WidgetNavigate"),
