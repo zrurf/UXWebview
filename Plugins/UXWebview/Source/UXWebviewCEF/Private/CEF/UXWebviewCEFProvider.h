@@ -123,6 +123,8 @@ private:
 
 	FIntPoint ViewSize = FIntPoint(1280, 720);
 	float DpiScale = 1.0f;
+	/** Last scale handed to the host; keeps redundant resizes off the IPC pipe. */
+	float SentDpiScale = 1.0f;
 	int32 TargetFrameRate = 60;
 	FString CurrentUrl;
 
@@ -133,7 +135,8 @@ private:
 	bool bLoggedBadHeader = false;
 
 	FUXWebviewFrameGovernor Governor;
-	double LastBeginFrameSeconds = 0.0;
+	/** Next BEGIN_FRAME is due at this time; keeps the cadence drift free. */
+	double NextBeginFrameSeconds = 0.0;
 
 	TArray<UTexture2D*> PoolTextures;
 	TArray<UTexture2D*> RetiredTextures;
@@ -153,6 +156,15 @@ private:
 	uint64 CopyCount = 0;
 	uint64 CopyTotalMicros = 0;
 	uint32 CopyMaxMicros = 0;
+
+	/** Time from host publish to sampling, i.e. what the view adds to page latency. */
+	double FrameAgeTotalMs = 0.0;
+	double FrameAgeMaxMs = 0.0;
+	uint64 FrameAgeSamples = 0;
+
+	/** 5 second rolling summary window. */
+	double SummarySeconds = 0.0;
+	uint64 SummaryFrames = 0;
 
 	TMap<uint32, TPair<FUXWebviewScriptCallback, double>> PendingScripts;
 	uint32 NextScriptRequestId = 1;

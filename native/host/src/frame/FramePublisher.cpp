@@ -322,9 +322,14 @@ struct FramePublisher::Impl
 				static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ClientHandles[i]));
 		}
 
+		// QPC ticks travel with the frame so the game side can measure how much
+		// latency this view adds between publish and sample.
+		LARGE_INTEGER publishTicks;
+		QueryPerformanceCounter(&publishTicks);
+		Header->PublishTicks = static_cast<uint64_t>(publishTicks.QuadPart);
+
 		std::atomic_thread_fence(std::memory_order_release);
 		InterlockedIncrement(reinterpret_cast<volatile LONG*>(&Header->Seq));
-		Header->PublishTicks = 0;
 
 		++FrameCount;
 		const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();

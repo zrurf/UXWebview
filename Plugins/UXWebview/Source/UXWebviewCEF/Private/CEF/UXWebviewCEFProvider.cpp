@@ -36,7 +36,11 @@ DECLARE_CYCLE_STAT(TEXT("Frame Copy"), STAT_UXWebview_FrameCopy, STATGROUP_UXWeb
 namespace
 {
 constexpr int32 kMaxViewSize = 2048;
+// High refresh displays go well past 120 Hz; the ticker only ever asks for one
+// frame per game frame, so a higher ceiling costs nothing when it is unused.
+constexpr int32 kMaxFrameRate = 240;
 constexpr double kScriptTimeoutSeconds = 5.0;
+constexpr double kSummaryIntervalSeconds = 5.0;
 
 void RenderFrameCopy(FRHICommandListImmediate& RHICmdList,
 	const TSharedPtr<FUXWebviewCefRenderState>& State, FUXWebviewCefFrameSample Sample)
@@ -144,7 +148,7 @@ FUXWebviewCapabilities FUXWebviewCEFProvider::GetCapabilities() const
 	Capabilities.bExternalBeginFrame = true;
 	Capabilities.bOfflineCache = true;
 	Capabilities.bDevTools = UUXWebviewSettings::Get().bEnableDevTools;
-	Capabilities.MaxFrameRate = 120;
+	Capabilities.MaxFrameRate = kMaxFrameRate;
 	Capabilities.MaxViewportSize = FIntPoint(kMaxViewSize, kMaxViewSize);
 	return Capabilities;
 }
@@ -174,7 +178,7 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 	ViewSize = FIntPoint(
 		FMath::Clamp(InitParams.ViewportSize.X, 64, kMaxViewSize),
 		FMath::Clamp(InitParams.ViewportSize.Y, 64, kMaxViewSize));
-	TargetFrameRate = FMath::Clamp(InitParams.TargetFrameRate, 0, 120);
+	TargetFrameRate = FMath::Clamp(InitParams.TargetFrameRate, 0, kMaxFrameRate);
 	bBeginFrameEnabled = TargetFrameRate > 0;
 	CurrentUrl = InitParams.InitialUrl;
 
@@ -199,6 +203,8 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 
 	FUXWebviewHostInstanceSpec Spec;
 	Spec.Size = ViewSize;
+	SentDpiScale = DpiScale;
+	Spec.DpiScale = DpiScale;
 	Spec.Url = CurrentUrl.IsEmpty() ? FString(TEXT("about:blank")) : CurrentUrl;
 	Spec.FrameRate = bBeginFrameEnabled ? TargetFrameRate : 60;
 	Spec.bVisible = true;
@@ -217,8 +223,8 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 		FTickerDelegate::CreateRaw(this, &FUXWebviewCEFProvider::Tick));
 
 	UE_LOG(LogUXWebviewCEFProvider, Log,
-		TEXT("cef view %u created: %dx%d fps=%d url='%s'"),
-		InstanceId, ViewSize.X, ViewSize.Y, Spec.FrameRate, *Spec.Url);
+		TEXT("cef view %u created: %dx%d scale=%.2f fps=%d url='%s'"),
+		InstanceId, ViewSize.X, ViewSize.Y, Spec.DpiScale, Spec.FrameRate, *Spec.Url);
 	return FUXWebviewResult::Ok();
 }
 
@@ -317,17 +323,19 @@ FUXWebviewResult FUXWebviewCEFProvider::SetViewport(const FIntPoint& Size, float
 		return Guard;
 	}
 
-	DpiScale = InDpiScale > 0.0f ? InDpiScale : 1.0f;
+	DpiScale = InDpiScale > 0.0f ? FMath::Clamp(InDpiScale, 0.25f, 4.0f) : 1.0f;
 	const FIntPoint Clamped(
 		FMath::Clamp(Size.X, 64, kMaxViewSize),
 		FMath::Clamp(Size.Y, 64, kMaxViewSize));
-	if (Clamped != ViewSize)
+	const bool bScaleChanged = !FMath::IsNearlyEqual(DpiScale, SentDpiScale, 0.001f);
+	if (Clamped != ViewSize || bScaleChanged)
 	{
 		ViewSize = Clamped;
+		SentDpiScale = DpiScale;
 		// The new texture pool is built once the host publishes the new size.
 		if (InstanceId != 0)
 		{
-			FUXWebviewHostClient::Get().Resize(InstanceId, Clamped);
+			FUXWebviewHostClient::Get().Resize(InstanceId, Clamped, DpiScale);
 		}
 	}
 	return FUXWebviewResult::Ok();
@@ -357,7 +365,7 @@ FUXWebviewResult FUXWebviewCEFProvider::SetFrameRate(int32 FramesPerSecond)
 		return Guard;
 	}
 
-	TargetFrameRate = FMath::Clamp(FramesPerSecond, 0, 120);
+	TargetFrameRate = FMath::Clamp(FramesPerSecond, 0, kMaxFrameRate);
 	bBeginFrameEnabled = TargetFrameRate > 0;
 
 	FUXWebviewGovernorConfig GovernorConfig = Governor.GetConfig();
@@ -629,6 +637,38 @@ bool FUXWebviewCEFProvider::Tick(float DeltaSeconds)
 		WindowSeconds = Now;
 	}
 
+	if (SummarySeconds == 0.0)
+	{
+		SummarySeconds = Now;
+		SummaryFrames = ReceivedFrames;
+	}
+	else if (Now - SummarySeconds >= kSummaryIntervalSeconds)
+	{
+		const double Elapsed = Now - SummarySeconds;
+		const double Fps = static_cast<double>(ReceivedFrames - SummaryFrames) / Elapsed;
+		const double CopyAvgMs = CopyCount > 0
+			? static_cast<double>(CopyTotalMicros) / static_cast<double>(CopyCount) * 0.001 : 0.0;
+		const double AgeAvgMs = FrameAgeSamples > 0
+			? FrameAgeTotalMs / static_cast<double>(FrameAgeSamples) : 0.0;
+
+		UE_LOG(LogUXWebviewCEFProvider, Log,
+			TEXT("cef view %u: %.1f fps (target %.0f), copyAvg=%.2fms copyMax=%.2fms, "
+				"ageAvg=%.2fms ageMax=%.2fms, drops=%llu"),
+			InstanceId, Fps, Governor.GetTargetFrameRate(),
+			CopyAvgMs, static_cast<double>(CopyMaxMicros) * 0.001,
+			AgeAvgMs, FrameAgeMaxMs,
+			static_cast<unsigned long long>(PoolDrops));
+
+		SummarySeconds = Now;
+		SummaryFrames = ReceivedFrames;
+		CopyCount = 0;
+		CopyTotalMicros = 0;
+		CopyMaxMicros = 0;
+		FrameAgeTotalMs = 0.0;
+		FrameAgeMaxMs = 0.0;
+		FrameAgeSamples = 0;
+	}
+
 	return true;
 }
 
@@ -771,6 +811,18 @@ bool FUXWebviewCEFProvider::SampleFrame()
 	}
 	Sample.DestTexture = DestTexture->GetResource()->TextureRHI;
 
+	if (Local.PublishTicks != 0)
+	{
+		const uint64 NowCycles = FPlatformTime::Cycles64();
+		if (NowCycles > Local.PublishTicks)
+		{
+			const double AgeMs = FPlatformTime::ToMilliseconds64(NowCycles - Local.PublishTicks);
+			FrameAgeTotalMs += AgeMs;
+			FrameAgeMaxMs = FMath::Max(FrameAgeMaxMs, AgeMs);
+			++FrameAgeSamples;
+		}
+	}
+
 	// Only now is the frame consumed; earlier exits leave the seq untouched so
 	// the next tick retries the same frame.
 	LastSeq = SeqA;
@@ -888,11 +940,18 @@ void FUXWebviewCEFProvider::RequestFrameIfDue(float TargetRate)
 
 	const double Now = FPlatformTime::Seconds();
 	const double Interval = 1.0 / static_cast<double>(TargetRate);
-	if (LastBeginFrameSeconds <= 0.0 || Now - LastBeginFrameSeconds >= Interval)
+	if (NextBeginFrameSeconds > 0.0 && Now < NextBeginFrameSeconds)
 	{
-		LastBeginFrameSeconds = Now;
-		FUXWebviewHostClient::Get().BeginFrame(InstanceId);
+		return;
 	}
+
+	// This tick can display at most one new frame, so never request more than
+	// one per tick; a higher target simply means "every game frame".
+	FUXWebviewHostClient::Get().BeginFrame(InstanceId);
+
+	// Advancing by the interval (instead of resetting to Now) keeps the cadence
+	// on a stable grid; Max() discards the backlog if a tick was very late.
+	NextBeginFrameSeconds = FMath::Max(NextBeginFrameSeconds + Interval, Now);
 }
 
 void FUXWebviewCEFProvider::PollScriptTimeouts()
