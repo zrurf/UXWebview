@@ -45,6 +45,11 @@ public:
 	FUXWebviewResult StopLoading();
 
 	FUXWebviewResult SetViewport(const FIntPoint& Size, float DpiScale);
+	/** Overlay only: absolute widget rect in parent client pixels, updated per tick. */
+	FUXWebviewResult SetOverlayBounds(const FIntPoint& Position, const FIntPoint& Size,
+		float DpiScale);
+	/** True when this view composites through a native child window. */
+	bool IsOverlayMode() const;
 	FUXWebviewResult SetVisible(bool bVisible);
 	FUXWebviewResult SetFrameRate(int32 FramesPerSecond);
 	FUXWebviewResult SetZoom(float ZoomFactor);

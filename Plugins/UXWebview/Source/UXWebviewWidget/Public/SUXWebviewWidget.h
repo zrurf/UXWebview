@@ -59,6 +59,7 @@ public:
 
 private:
 	void UpdateViewport(const FGeometry& AllottedGeometry);
+	void UpdateOverlayBounds(const FGeometry& AllottedGeometry, UUXWebview& View);
 	void UpdateBrush();
 	void SyncFocus(bool bFocused);
 	FVector2D LocalToCss(const FGeometry& Geometry, const FVector2D& LocalPosition) const;
@@ -71,6 +72,9 @@ private:
 	UTexture2D* LastTexture = nullptr;
 	FUXWebviewInputFilter Filter;
 	FIntPoint ViewportSize = FIntPoint::ZeroValue;
+	/** Last rectangle handed to an overlay browser, in window client pixels. */
+	FIntPoint OverlayPosition = FIntPoint::ZeroValue;
+	FIntPoint OverlaySize = FIntPoint::ZeroValue;
 	FVector2D DesiredSize = FVector2D(512.0f, 288.0f);
 	/** Zero follows the layout scale so text renders at native pixel density. */
 	float DpiScale = 0.0f;

@@ -10,6 +10,7 @@
 #include "HAL/PlatformMisc.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "UnrealClient.h"
 #include "UUXWebview.h"
 #include "UUXWebviewSubsystem.h"
 #include "UUXWebviewWidget.h"
@@ -121,8 +122,12 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	const FString Provider = Args.Num() > 2 && !Args[2].IsEmpty() ? Args[2] : FString(TEXT("Null"));
 	const FString Url = Args.Num() > 3 ? Args[3] : FString();
 	const int32 FrameRate = Args.Num() > 4 ? FCString::Atoi(*Args[4]) : 30;
-	const int32 Width = 512;
-	const int32 Height = 288;
+	// Optional size args let a perf pass use the same command for full-screen
+	// viewports; the defaults stay at the small demo panel.
+	const int32 Width = Args.Num() > 5 ? FMath::Max(FCString::Atoi(*Args[5]), 16) : 512;
+	const int32 Height = Args.Num() > 6 ? FMath::Max(FCString::Atoi(*Args[6]), 16) : 288;
+	// Non-zero switches the view to a native overlay child window (no texture copy).
+	const bool bOverlay = Args.Num() > 7 && FCString::Atoi(*Args[7]) != 0;
 	const float BoxScale = Dpi > 0.0f ? Dpi : 1.0f;
 
 	FUXWebviewCreateParams Params;
@@ -133,6 +138,7 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	Params.DpiScale = Dpi;
 	Params.TargetFrameRate = FrameRate;
 	Params.InitialUrl = Url;
+	Params.DisplayMode = bOverlay ? EUXWebviewDisplayMode::Overlay : EUXWebviewDisplayMode::Texture;
 
 	FUXWebviewResult Result;
 	UUXWebview* Webview = Subsystem->CreateWebview(Params, Result);
@@ -158,21 +164,27 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	GWidgetDemoGameInstance = GameInstance;
 	GWidgetDemoWidget = Widget;
 
+	// The viewport overlay gives its content the full viewport size, so an outer
+	// box centers a size-constrained inner box instead of the leaf itself.
 	GWidgetDemoRoot = SNew(SBox)
-		.WidthOverride(static_cast<float>(Width))
-		.HeightOverride(static_cast<float>(Height))
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
 		[
-			Widget->TakeWidget()
+			SNew(SBox)
+			.WidthOverride(static_cast<float>(Width))
+			.HeightOverride(static_cast<float>(Height))
+			[
+				Widget->TakeWidget()
+			]
 		];
 	ViewportClient->AddViewportWidgetContent(GWidgetDemoRoot.ToSharedRef(), 10);
 
 	const FString UrlDisplay = Url.IsEmpty() ? FString(TEXT("(default)")) : Url;
 	UE_LOG(LogUXWebviewWidgetDemo, Log,
-		TEXT("widget demo started: provider=%s url=%s %dx%d dpi=%.2f (0=auto) viewport=%dx%d fps=%d; click inside to send input"),
+		TEXT("widget demo started: provider=%s url=%s %dx%d dpi=%.2f (0=auto) viewport=%dx%d fps=%d mode=%s; click inside to send input"),
 		*Provider, *UrlDisplay,
-		Width, Height, Dpi, Params.ViewportSize.X, Params.ViewportSize.Y, FrameRate);
+		Width, Height, Dpi, Params.ViewportSize.X, Params.ViewportSize.Y, FrameRate,
+		bOverlay ? TEXT("overlay") : TEXT("texture"));
 
 	if (Seconds > 0.0f)
 	{
@@ -348,6 +360,61 @@ void BridgeCommand(const TArray<FString>& Args, UWorld* World)
 	});
 }
 
+/**
+ * Samples the page's requestAnimationFrame rate. Overlay browsers composite
+ * inside their own window, so this is the only headless way to see how many
+ * frames the page actually gets.
+ */
+void FpsProbeCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 3.0f;
+	const float Seconds = FMath::Max(Args.Num() > 1 ? FCString::Atof(*Args[1]) : 3.0f, 0.5f);
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("fps probe (%0.1fs window)"), Seconds),
+		[Seconds](UUXWebview* View)
+		{
+			const FString Script = FString::Printf(TEXT(
+				"new Promise(function(resolve){"
+				"var frames=0,start=0;"
+				"function step(now){"
+				"if(start===0){start=now;}"
+				"frames++;"
+				"if(now-start>=%.0f){resolve('raf-fps:'+(frames*1000/(now-start)).toFixed(1)"
+				"+' frames='+frames);return;}"
+				"requestAnimationFrame(step);}"
+				"requestAnimationFrame(step);})"), Seconds * 1000.0f);
+
+			View->ExecuteScript(Script, [](bool bSuccess, const FString& Result)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("fps probe ok=%d '%s'"),
+					bSuccess ? 1 : 0, *Result);
+			});
+		});
+}
+
+/**
+ * Captures the game viewport after a delay. Texture mode draws the web frame
+ * into the viewport, so a HighResShot is the headless way to inspect the
+ * pixels that are actually presented.
+ */
+void ScreenshotCommand(const TArray<FString>& Args, UWorld* World)
+{
+	const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 3.0f;
+	ScheduleViewAction(Delay, FString::Printf(TEXT("screenshot after %0.1fs"), Delay),
+		[World](UUXWebview* View)
+		{
+			UWorld* TargetWorld = World ? World : (View ? View->GetWorld() : nullptr);
+			if (TargetWorld)
+			{
+				// An explicit path keeps the file name stable for comparison runs.
+				FScreenshotRequest::RequestScreenshot(
+					FPaths::ProjectSavedDir() / TEXT("Screenshots") / TEXT("uxwebview-shot"), true, false);
+				UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("screenshot requested"));
+			}
+		});
+}
+
 /** Sends a game event to the page as a 'uxwv' CustomEvent. */
 void EmitCommand(const TArray<FString>& Args, UWorld* World)
 {
@@ -449,7 +516,7 @@ void SecondViewCommand(const TArray<FString>& Args, UWorld* World)
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetDemoCommand(
 	TEXT("UXWebviewSample.WidgetDemo"),
-	TEXT("UXWebviewSample.WidgetDemo [dpi] [seconds] [provider] [url] [fps] - hosts the UMG webview widget in the viewport"),
+	TEXT("UXWebviewSample.WidgetDemo [dpi] [seconds] [provider] [url] [fps] [width] [height] [overlay] - hosts the UMG webview widget in the viewport"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&StartWidgetDemo));
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetProbeCommand(
@@ -476,6 +543,16 @@ FAutoConsoleCommandWithWorldAndArgs GWidgetBridgeCommand(
 	TEXT("UXWebviewSample.WidgetBridge"),
 	TEXT("UXWebviewSample.WidgetBridge [delay] - makes the page call window.uxwv.call and logs the reply"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&BridgeCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetFpsProbeCommand(
+	TEXT("UXWebviewSample.WidgetFpsProbe"),
+	TEXT("UXWebviewSample.WidgetFpsProbe [delay] [seconds] - samples the page requestAnimationFrame rate and logs it"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&FpsProbeCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetScreenshotCommand(
+	TEXT("UXWebviewSample.WidgetScreenshot"),
+	TEXT("UXWebviewSample.WidgetScreenshot [delay] - requests a HighResShot of the game viewport"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ScreenshotCommand));
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetEmitCommand(
 	TEXT("UXWebviewSample.WidgetEmit"),

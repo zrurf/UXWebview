@@ -12,7 +12,7 @@
 
 #include <stdint.h>
 
-#define UXWV_IPC_VERSION 2u
+#define UXWV_IPC_VERSION 3u
 /* A single message above this size disconnects the client on purpose. */
 #define UXWV_IPC_MAX_PAYLOAD (2u * 1024u * 1024u)
 /* UTF-8 bytes carried after UxInputEvent (key character / IME text). */
@@ -62,6 +62,9 @@ typedef enum UxIpcType
     /* Script bridge: page -> game queries and their replies. */
     UXWV_IPC_EMIT           = 24, /* plugin -> host: payload {"event": "...", "payload": "..."} */
     UXWV_IPC_BRIDGE_RESULT  = 25, /* plugin -> host: payload {"request": n, "success": bool, "result": "..."} */
+
+    /* Overlay geometry: native child window position in parent client pixels. */
+    UXWV_IPC_SET_BOUNDS     = 26, /* payload {"x": n, "y": n, "w": n, "h": n, "scale": float} */
 
     /* Host -> plugin events. Event names are the message type. */
     UXWV_IPC_EVENT_READY      = 30, /* browser created */

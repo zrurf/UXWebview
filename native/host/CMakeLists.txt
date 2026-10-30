@@ -68,6 +68,7 @@ target_link_libraries(UXWebviewHost PRIVATE
 	d3d11
 	d3d12
 	dxgi
+	user32
 )
 
 SET_CEF_TARGET_OUT_DIR()

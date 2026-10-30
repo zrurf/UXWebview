@@ -1,6 +1,7 @@
 #include "app/HostApp.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 #include "cef_frame.h"
@@ -110,7 +111,19 @@ int GetInt(const CefRefPtr<CefDictionaryValue>& dict, const char* key, int fallb
 	{
 		return fallback;
 	}
-	return dict->GetInt(key);
+
+	// Accept both integer and floating JSON numbers so a "1920.0" width still
+	// creates the intended viewport instead of collapsing to the fallback.
+	const CefValueType type = dict->GetType(key);
+	if (type == VTYPE_INT)
+	{
+		return dict->GetInt(key);
+	}
+	if (type == VTYPE_DOUBLE)
+	{
+		return static_cast<int>(dict->GetDouble(key));
+	}
+	return fallback;
 }
 
 float GetFloat(const CefRefPtr<CefDictionaryValue>& dict, const char* key, float fallback)
@@ -119,7 +132,19 @@ float GetFloat(const CefRefPtr<CefDictionaryValue>& dict, const char* key, float
 	{
 		return fallback;
 	}
-	return static_cast<float>(dict->GetDouble(key));
+
+	// The JSON parser keeps integral numbers as VTYPE_INT, so GetDouble alone
+	// would silently yield 0 for values such as "scale": 1 written by the plugin.
+	const CefValueType type = dict->GetType(key);
+	if (type == VTYPE_DOUBLE)
+	{
+		return static_cast<float>(dict->GetDouble(key));
+	}
+	if (type == VTYPE_INT)
+	{
+		return static_cast<float>(dict->GetInt(key));
+	}
+	return fallback;
 }
 
 bool GetBool(const CefRefPtr<CefDictionaryValue>& dict, const char* key, bool fallback)
@@ -129,6 +154,23 @@ bool GetBool(const CefRefPtr<CefDictionaryValue>& dict, const char* key, bool fa
 		return fallback;
 	}
 	return dict->GetBool(key);
+}
+
+// Window handles are 64-bit and exceed the exact integer range of JSON, so
+// they travel as strings and are parsed back here.
+uint64_t GetHandle(const CefRefPtr<CefDictionaryValue>& dict, const char* key)
+{
+	if (!dict || !dict->HasKey(key))
+	{
+		return 0;
+	}
+
+	const std::string value = GetString(dict, key);
+	if (value.empty())
+	{
+		return 0;
+	}
+	return strtoull(value.c_str(), nullptr, 10);
 }
 
 std::vector<std::string> GetStringList(const CefRefPtr<CefDictionaryValue>& dict, const char* key)
@@ -396,6 +438,18 @@ void HostApp::ProcessMessage(const UxIpcMessage& message, const std::vector<uint
 		Manager.SetVisible(message.Instance, message.A != 0);
 		break;
 	}
+	case UXWV_IPC_SET_BOUNDS:
+	{
+		const CefRefPtr<CefDictionaryValue> dict = ParsePayload(payload);
+		if (dict)
+		{
+			Manager.SetBounds(message.Instance,
+				GetInt(dict, "x", 0), GetInt(dict, "y", 0),
+				GetInt(dict, "w", 0), GetInt(dict, "h", 0),
+				GetFloat(dict, "scale", 1.0f));
+		}
+		break;
+	}
 	case UXWV_IPC_SET_FRAME_RATE:
 	{
 		Manager.SetFrameRate(message.Instance, static_cast<int>(message.A));
@@ -503,14 +557,20 @@ void HostApp::HandleCreate(const UxIpcMessage& message, const std::vector<uint8_
 	const int frameRate = GetInt(dict, "fps", 60);
 	const bool visible = GetBool(dict, "visible", true);
 	const float deviceScale = GetFloat(dict, "scale", 1.0f);
+	const bool overlay = GetBool(dict, "overlay", false);
+	const uint64_t parentHandle = GetHandle(dict, "parent");
+	const int posX = GetInt(dict, "x", 0);
+	const int posY = GetInt(dict, "y", 0);
 	const std::string url = GetString(dict, "url");
 	const std::vector<std::string> allowedOrigins = GetStringList(dict, "origins");
 
 	const bool created = Manager.Create(message.Instance, sharedMemory, width, height,
-		url.empty() ? "about:blank" : url, frameRate, visible, deviceScale, allowedOrigins);
+		url.empty() ? "about:blank" : url, frameRate, visible, deviceScale, allowedOrigins,
+		overlay, parentHandle, posX, posY);
 
 	CefRefPtr<CefDictionaryValue> reply = CefDictionaryValue::Create();
 	reply->SetBool("ok", created);
+	reply->SetString("mode", Manager.IsOverlay(message.Instance) ? "overlay" : "texture");
 	CefRefPtr<CefValue> root = CefValue::Create();
 	root->SetDictionary(reply);
 	SendMessage(UXWV_IPC_CREATE_ACK, message.Instance, message.RequestId,

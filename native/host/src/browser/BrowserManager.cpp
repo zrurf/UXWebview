@@ -2,7 +2,12 @@
 
 #include "cef_frame.h"
 #include "cef_parser.h"
+#include "cef_task.h"
 #include "cef_values.h"
+
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
 
 #include "util/Log.h"
 
@@ -78,6 +83,59 @@ std::string InjectBaseUrl(const std::string& html, const std::string& base)
 	}
 	return tag + html;
 }
+
+#if defined(_WIN32)
+/**
+ * The overlay rectangle arrives in the game window's client coordinates, but a
+ * popup window is positioned on the desktop, so the client origin is added.
+ */
+CefRect OverlayScreenRect(CefWindowHandle parent, int x, int y, int width, int height)
+{
+	POINT origin{0, 0};
+	if (parent && ::IsWindow(parent))
+	{
+		::ClientToScreen(parent, &origin);
+	}
+	return CefRect(origin.x + x, origin.y + y, width, height);
+}
+
+/**
+ * CEF always turns the browser window into a child of the handle it is given,
+ * so the overlay uses a host-owned carrier popup instead of the game window:
+ * the game's flip-model swap chain hides child HWNDs (airspace), a plain popup
+ * above the game does not.
+ */
+HWND CreateOverlayWindow(HWND owner, const CefRect& bounds)
+{
+	static const ATOM windowClass = []()
+	{
+		WNDCLASSEXW wc{};
+		wc.cbSize = sizeof(wc);
+		wc.lpfnWndProc = ::DefWindowProcW;
+		wc.hInstance = ::GetModuleHandleW(nullptr);
+		wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+		wc.lpszClassName = L"UXWebviewOverlayWindow";
+		return ::RegisterClassExW(&wc);
+	}();
+	if (windowClass == 0)
+	{
+		UXWV_LOG_ERROR("overlay window class registration failed (%lu)",
+			::GetLastError());
+		return nullptr;
+	}
+
+	HWND hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, L"UXWebviewOverlayWindow",
+		L"UXWebview overlay", WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+		bounds.x, bounds.y, bounds.width, bounds.height, owner, nullptr,
+		::GetModuleHandleW(nullptr), nullptr);
+	if (!hwnd)
+	{
+		UXWV_LOG_ERROR("overlay window creation failed (%lu)", ::GetLastError());
+	}
+	return hwnd;
+}
+
+#endif
 } // namespace
 
 BrowserManager::BrowserManager(uint64_t adapterLuid, uint32_t ownerPid, EventSender onEvent)
@@ -92,7 +150,8 @@ BrowserManager::~BrowserManager()
 
 bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
 	const std::string& url, int frameRate, bool visible, float deviceScale,
-	const std::vector<std::string>& allowedOrigins)
+	const std::vector<std::string>& allowedOrigins, bool overlay, uint64_t parentHandle,
+	int posX, int posY)
 {
 	if (width <= 0 || height <= 0)
 	{
@@ -104,18 +163,47 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 		UXWV_LOG_WARN("instance %u already exists", id);
 		return false;
 	}
+	if (overlay && parentHandle == 0)
+	{
+		UXWV_LOG_ERROR("instance %u: overlay needs a parent window handle", id);
+		return false;
+	}
 
 	auto instance = std::make_unique<Instance>();
 	instance->Id = id;
-	instance->Publisher = std::make_unique<FramePublisher>();
 	instance->PendingUrl = url;
 	instance->SharedMemoryName = sharedMemoryName;
 	instance->bVisible = visible;
+	instance->bOverlay = overlay;
+	instance->ParentHandle = parentHandle;
+	instance->PosX = posX;
+	instance->PosY = posY;
+	instance->Width = width;
+	instance->Height = height;
 
-	if (!instance->Publisher->Start(sharedMemoryName, AdapterLuid, OwnerPid))
+	if (overlay)
 	{
-		UXWV_LOG_ERROR("instance %u: frame publisher failed", id);
-		return false;
+		const CefWindowHandle owner =
+			reinterpret_cast<CefWindowHandle>(static_cast<uintptr_t>(parentHandle));
+		HWND carrier = CreateOverlayWindow(owner,
+			OverlayScreenRect(owner, posX, posY, width, height));
+		if (!carrier)
+		{
+			UXWV_LOG_ERROR("instance %u: overlay carrier window failed", id);
+			return false;
+		}
+		instance->CarrierHandle = reinterpret_cast<uint64_t>(carrier);
+	}
+
+	// Overlay browsers composite natively, so they publish no frames at all.
+	if (!overlay)
+	{
+		instance->Publisher = std::make_unique<FramePublisher>();
+		if (!instance->Publisher->Start(sharedMemoryName, AdapterLuid, OwnerPid))
+		{
+			UXWV_LOG_ERROR("instance %u: frame publisher failed", id);
+			return false;
+		}
 	}
 
 	instance->Client = new BrowserClient(
@@ -134,19 +222,35 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 	Instances[id] = std::move(instance);
 
 	CefWindowInfo windowInfo;
-	windowInfo.SetAsWindowless(nullptr);
-	windowInfo.shared_texture_enabled = true;
-	windowInfo.external_begin_frame_enabled = frameRate > 0;
-
 	CefBrowserSettings browserSettings;
-	browserSettings.windowless_frame_rate = frameRate > 0 ? frameRate : 60;
+	if (overlay)
+	{
+		// Chromium's child window fills the carrier popup, which is a member of
+		// the game window's z-order but outside its flip-model swap chain.
+		const CefWindowHandle carrier =
+			reinterpret_cast<CefWindowHandle>(static_cast<uintptr_t>(raw->CarrierHandle));
+		windowInfo.SetAsChild(carrier, CefRect(0, 0, width, height));
+	}
+	else
+	{
+		windowInfo.SetAsWindowless(nullptr);
+		windowInfo.shared_texture_enabled = true;
+		windowInfo.external_begin_frame_enabled = frameRate > 0;
+		browserSettings.windowless_frame_rate = frameRate > 0 ? frameRate : 60;
+	}
 
-	UXWV_LOG_INFO("instance %u: creating browser %dx%d at scale %.3f fps=%d url='%s'",
-		id, width, height, deviceScale, frameRate, url.c_str());
+	UXWV_LOG_INFO("instance %u: creating %s browser %dx%d at scale %.3f fps=%d url='%s'",
+		id, overlay ? "overlay" : "off-screen", width, height, deviceScale, frameRate, url.c_str());
 
 	CefBrowserHost::CreateBrowser(
 		windowInfo, raw->Client, CefString(url), browserSettings, nullptr, nullptr);
 	return true;
+}
+
+bool BrowserManager::IsOverlay(uint32_t id) const
+{
+	auto it = Instances.find(id);
+	return it != Instances.end() && it->second->bOverlay;
 }
 
 void BrowserManager::Destroy(uint32_t id)
@@ -166,6 +270,11 @@ void BrowserManager::Destroy(uint32_t id)
 	}
 	else
 	{
+		HWND carrier = reinterpret_cast<HWND>(static_cast<uintptr_t>(instance->CarrierHandle));
+		if (carrier && ::IsWindow(carrier))
+		{
+			::DestroyWindow(carrier);
+		}
 		Instances.erase(it);
 	}
 }
@@ -238,12 +347,76 @@ void BrowserManager::Resize(uint32_t id, int width, int height, float deviceScal
 
 	Instance* instance = it->second.get();
 	instance->Client->SetViewSize(width, height, deviceScale);
-	if (instance->Browser)
+	if (!instance->Browser)
 	{
-		// A new scale changes the DIP layout, which CEF only picks up when the
-		// screen info is reported as changed.
-		instance->Browser->GetHost()->NotifyScreenInfoChanged();
-		instance->Browser->GetHost()->WasResized();
+		return;
+	}
+
+	if (instance->bOverlay)
+	{
+		// The native window is the view; moving it resizes Chromium's layout.
+		MoveOverlayWindow(*instance, instance->PosX, instance->PosY, width, height);
+		return;
+	}
+
+	// A new scale changes the DIP layout, which CEF only picks up when the
+	// screen info is reported as changed.
+	instance->Browser->GetHost()->NotifyScreenInfoChanged();
+	instance->Browser->GetHost()->WasResized();
+}
+
+void BrowserManager::SetBounds(uint32_t id, int x, int y, int width, int height,
+	float deviceScale)
+{
+	auto it = Instances.find(id);
+	if (it == Instances.end() || width <= 0 || height <= 0)
+	{
+		return;
+	}
+
+	Instance* instance = it->second.get();
+	instance->PosX = x;
+	instance->PosY = y;
+	instance->Client->SetViewSize(width, height, deviceScale);
+	if (!instance->bOverlay || !instance->Browser)
+	{
+		return;
+	}
+
+	MoveOverlayWindow(*instance, x, y, width, height);
+	UXWV_LOG_INFO("instance %u: overlay bounds %d,%d %dx%d at scale %.3f",
+		id, x, y, width, height, deviceScale);
+}
+
+void BrowserManager::MoveOverlayWindow(Instance& instance, int x, int y, int width,
+	int height)
+{
+	instance.PosX = x;
+	instance.PosY = y;
+	instance.Width = width;
+	instance.Height = height;
+
+	HWND carrier = reinterpret_cast<HWND>(static_cast<uintptr_t>(instance.CarrierHandle));
+	if (!carrier || !::IsWindow(carrier))
+	{
+		return;
+	}
+
+	const CefRect bounds = OverlayScreenRect(
+		reinterpret_cast<CefWindowHandle>(static_cast<uintptr_t>(instance.ParentHandle)),
+		x, y, width, height);
+	::SetWindowPos(carrier, nullptr, bounds.x, bounds.y, width, height,
+		SWP_NOZORDER | SWP_NOACTIVATE);
+
+	// Chromium does not follow the carrier on its own, so the browser window is
+	// stretched to its client area; GetViewRect still defines the page layout.
+	CefWindowHandle handle = instance.Browser ? instance.Browser->GetHost()->GetWindowHandle()
+		: nullptr;
+	if (handle)
+	{
+		::SetWindowPos(handle, nullptr, 0, 0, width, height,
+			SWP_NOZORDER | SWP_NOACTIVATE);
+		instance.Browser->GetHost()->NotifyMoveOrResizeStarted();
 	}
 }
 
@@ -255,8 +428,23 @@ void BrowserManager::SetVisible(uint32_t id, bool visible)
 		return;
 	}
 
-	CefRefPtr<CefBrowserHost> host = it->second->Browser->GetHost();
-	host->WasHidden(!visible);
+	Instance* instance = it->second.get();
+	instance->bVisible = visible;
+
+	if (instance->bOverlay)
+	{
+		HWND carrier = reinterpret_cast<HWND>(static_cast<uintptr_t>(instance->CarrierHandle));
+		if (carrier && ::IsWindow(carrier))
+		{
+			// SW_SHOWNA shows the popup above the game without stealing focus;
+			// a click on the page activates it when the user wants to type.
+			::ShowWindow(carrier, visible ? SW_SHOWNA : SW_HIDE);
+			UXWV_LOG_INFO("instance %u: overlay window %s", id, visible ? "shown" : "hidden");
+		}
+		return;
+	}
+
+	instance->Browser->GetHost()->WasHidden(!visible);
 }
 
 void BrowserManager::SetFrameRate(uint32_t id, int frameRate)
@@ -266,32 +454,58 @@ void BrowserManager::SetFrameRate(uint32_t id, int frameRate)
 	{
 		return;
 	}
+	if (it->second->bOverlay)
+	{
+		// Windowed browsers are paced by the compositor, not by external begin frames.
+		return;
+	}
 	it->second->Browser->GetHost()->SetWindowlessFrameRate(frameRate);
 }
 
 void BrowserManager::Focus(uint32_t id, bool focused)
 {
 	auto it = Instances.find(id);
-	if (it != Instances.end() && it->second->Browser)
+	if (it == Instances.end() || !it->second->Browser)
 	{
-		it->second->Browser->GetHost()->SetFocus(focused);
+		return;
 	}
+
+	CefRefPtr<CefBrowserHost> host = it->second->Browser->GetHost();
+	if (it->second->bOverlay)
+	{
+		if (focused)
+		{
+			CefWindowHandle handle = host->GetWindowHandle();
+			if (handle)
+			{
+				::SetFocus(handle);
+			}
+		}
+		else
+		{
+			host->SetFocus(false);
+		}
+		return;
+	}
+	host->SetFocus(focused);
 }
 
 void BrowserManager::BeginFrame(uint32_t id)
 {
 	auto it = Instances.find(id);
-	if (it != Instances.end() && it->second->Browser)
+	if (it == Instances.end() || !it->second->Browser || it->second->bOverlay)
 	{
-		it->second->Browser->GetHost()->SendExternalBeginFrame();
+		return;
 	}
+	it->second->Browser->GetHost()->SendExternalBeginFrame();
 }
 
 void BrowserManager::SendInput(uint32_t id, const UxInputEvent& event, const std::string& text)
 {
 	auto it = Instances.find(id);
-	if (it == Instances.end() || !it->second->Browser)
+	if (it == Instances.end() || !it->second->Browser || it->second->bOverlay)
 	{
+		// Overlay windows receive real keyboard and mouse messages themselves.
 		return;
 	}
 
@@ -400,7 +614,22 @@ void BrowserManager::OnBrowserCreated(uint32_t id, CefRefPtr<CefBrowser> browser
 	instance->Browser = browser;
 	Emit(id, UXWV_IPC_EVENT_READY, "{}");
 
-	if (!instance->bVisible)
+	if (instance->bOverlay)
+	{
+		// The carrier is created hidden; the plugin shows it once the widget
+		// rectangle is known, which avoids a flash at the origin.
+		MoveOverlayWindow(*instance, instance->PosX, instance->PosY, instance->Width,
+			instance->Height);
+		HWND carrier = reinterpret_cast<HWND>(static_cast<uintptr_t>(instance->CarrierHandle));
+		if (carrier && ::IsWindow(carrier))
+		{
+			if (instance->bVisible)
+			{
+				::ShowWindow(carrier, SW_SHOWNA);
+			}
+		}
+	}
+	else if (!instance->bVisible)
 	{
 		browser->GetHost()->WasHidden(true);
 	}
@@ -418,6 +647,14 @@ void BrowserManager::OnBrowserClosed(uint32_t id)
 	if (it == Instances.end())
 	{
 		return;
+	}
+
+	HWND carrier = reinterpret_cast<HWND>(static_cast<uintptr_t>(it->second->CarrierHandle));
+	if (carrier && ::IsWindow(carrier))
+	{
+		// The browser window is gone; the carrier would otherwise stay behind as
+		// an empty popup above the game.
+		::DestroyWindow(carrier);
 	}
 	Instances.erase(it);
 }

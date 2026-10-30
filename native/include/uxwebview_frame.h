@@ -14,8 +14,11 @@
 #include <stdint.h>
 
 #define UXWV_FRAME_MAGIC     0x55585746u /* 'UXWF' */
-#define UXWV_FRAME_VERSION   1u
-#define UXWV_FRAME_POOL_SIZE 3
+#define UXWV_FRAME_VERSION   2u
+#define UXWV_FRAME_POOL_SIZE 4
+
+/** ClientHeld value for "no buffer": all bits set in both halves. */
+#define UXWV_BUFFER_NONE     0xFFFFFFFFu
 
 typedef enum UxFrameFormat
 {
@@ -39,6 +42,17 @@ typedef struct UxFrameHeader
     /* Windows: NT handle value of each pool texture.
      * macOS: IOSurfaceID. Linux: unused (CPU path). */
     uint64_t SharedHandles[UXWV_FRAME_POOL_SIZE];
+
+    /* Client side handshake for direct sampling (no copy). When HoldBuffers
+     * is 1 the client keeps the buffers in ClientHeld on screen and the host
+     * must not copy into them. ClientHeld packs the current buffer in the
+     * low 32 bits and the previous one in the high 32 bits, written as one
+     * 64-bit value so a reader never sees a half updated pair.
+     * UXWV_BUFFER_NONE marks an empty slot. Both fields are written by the
+     * client at publish time, so the host polls them before picking a buffer. */
+    uint32_t HoldBuffers;
+    uint32_t Reserved0;
+    uint64_t ClientHeld;
 
     uint32_t Seq;          /* Monotonic; the only change signal */
     uint32_t Reserved;

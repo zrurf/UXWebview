@@ -61,6 +61,21 @@ public:
 	virtual FUXWebviewResult StopLoading() = 0;
 
 	virtual FUXWebviewResult SetViewport(const FIntPoint& Size, float DpiScale) = 0;
+	/**
+	 * Overlay only: position of the native window inside the game client area,
+	 * in physical pixels. Providers without overlay support reject this.
+	 */
+	virtual FUXWebviewResult SetOverlayBounds(const FIntPoint& Position,
+		const FIntPoint& Size, float DpiScale)
+	{
+		(void)Position;
+		(void)Size;
+		(void)DpiScale;
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotSupported,
+			TEXT("overlay bounds are not supported by this provider"));
+	}
+	/** True when this provider draws into a native window instead of a texture. */
+	virtual bool IsOverlayMode() const { return false; }
 	virtual FUXWebviewResult SetVisible(bool bVisible) = 0;
 	virtual FUXWebviewResult SetFrameRate(int32 FramesPerSecond) = 0;
 	virtual FUXWebviewResult SetZoom(float ZoomFactor) = 0;

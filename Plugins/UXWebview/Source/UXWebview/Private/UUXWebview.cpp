@@ -182,6 +182,27 @@ FUXWebviewResult UUXWebview::SetViewport(const FIntPoint& Size, float DpiScale)
 	return Provider->SetViewport(Size, DpiScale);
 }
 
+FUXWebviewResult UUXWebview::SetOverlayBounds(const FIntPoint& Position, const FIntPoint& Size,
+	float DpiScale)
+{
+	const FUXWebviewResult Alive = GuardAlive();
+	if (!Alive.bSuccess)
+	{
+		return Alive;
+	}
+	if (Size.X <= 0 || Size.Y <= 0)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidArgs,
+			TEXT("overlay size must be positive"));
+	}
+	return Provider->SetOverlayBounds(Position, Size, DpiScale);
+}
+
+bool UUXWebview::IsOverlayMode() const
+{
+	return Provider.IsValid() && Provider->IsOverlayMode();
+}
+
 FUXWebviewResult UUXWebview::SetVisible(bool bVisible)
 {
 	const FUXWebviewResult Alive = GuardAlive();

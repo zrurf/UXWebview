@@ -27,11 +27,13 @@ public:
 
 	bool Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
 		const std::string& url, int frameRate, bool visible, float deviceScale,
-		const std::vector<std::string>& allowedOrigins);
+		const std::vector<std::string>& allowedOrigins, bool overlay, uint64_t parentHandle,
+		int posX, int posY);
 	void Destroy(uint32_t id);
 	void ShutdownAll();
 
 	bool Has(uint32_t id) const { return Instances.find(id) != Instances.end(); }
+	bool IsOverlay(uint32_t id) const;
 	size_t Count() const { return Instances.size(); }
 
 	void Navigate(uint32_t id, const std::string& url);
@@ -40,6 +42,11 @@ public:
 	void StopLoading(uint32_t id);
 
 	void Resize(uint32_t id, int width, int height, float deviceScale);
+	/**
+	 * Overlay only: moves the native popup window to the given rectangle,
+	 * expressed in the game window's client coordinates.
+	 */
+	void SetBounds(uint32_t id, int x, int y, int width, int height, float deviceScale);
 	void SetVisible(uint32_t id, bool visible);
 	void SetFrameRate(uint32_t id, int frameRate);
 	void Focus(uint32_t id, bool focused);
@@ -61,10 +68,23 @@ private:
 		std::string SharedMemoryName;
 		bool bVisible = true;
 		bool bClosing = false;
+		/** Overlay instances own a native top-level popup instead of a frame pool. */
+		bool bOverlay = false;
+		/** Game window the overlay follows; also the origin for PosX/PosY. */
+		uint64_t ParentHandle = 0;
+		/** Host-owned carrier window that Chromium's child window lives in. */
+		uint64_t CarrierHandle = 0;
+		/** Overlay position in the game window's client coordinates. */
+		int PosX = 0;
+		int PosY = 0;
+		/** Overlay size in physical pixels. */
+		int Width = 0;
+		int Height = 0;
 	};
 
 	void OnBrowserCreated(uint32_t id, CefRefPtr<CefBrowser> browser);
 	void OnBrowserClosed(uint32_t id);
+	void MoveOverlayWindow(Instance& instance, int x, int y, int width, int height);
 	void Emit(uint32_t instanceId, uint32_t type, const std::string& json) const;
 
 	uint64_t AdapterLuid = 0;

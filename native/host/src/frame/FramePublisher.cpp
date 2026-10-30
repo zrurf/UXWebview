@@ -90,16 +90,19 @@ struct FramePublisher::Impl
 	ComPtr<ID3D12Resource> PooledShared[UXWV_FRAME_POOL_SIZE];
 	ComPtr<ID3D11Texture2D> Pooled[UXWV_FRAME_POOL_SIZE];
 	// Handles opened by this process.
-	HANDLE SharedHandles[UXWV_FRAME_POOL_SIZE] = {nullptr, nullptr, nullptr};
+	HANDLE SharedHandles[UXWV_FRAME_POOL_SIZE] = {};
 	// The same handles duplicated into the game process; NT handles are
 	// process-local, so raw values are not valid there otherwise.
-	HANDLE ClientHandles[UXWV_FRAME_POOL_SIZE] = {nullptr, nullptr, nullptr};
+	HANDLE ClientHandles[UXWV_FRAME_POOL_SIZE] = {};
 	HANDLE OwnerProcess = nullptr;
 	uint64_t AdapterLuid = 0;
 	int PoolWidth = 0;
 	int PoolHeight = 0;
 	uint32_t Generation = 0;
 	uint32_t NextBuffer = 0;
+	// Newest published buffer: a direct display client is about to claim it,
+	// so it stays untouched until a newer frame replaces it.
+	uint32_t LastPublished = UXWV_BUFFER_NONE;
 
 	HANDLE Mapping = nullptr;
 	UxFrameHeader* Header = nullptr;
@@ -303,6 +306,36 @@ struct FramePublisher::Impl
 		return true;
 	}
 
+	// Direct display clients sample the pool without copying, so they keep the
+	// newest buffer and the one before it on screen. Writing into either would
+	// replace pixels that are still being read on the game GPU.
+	uint32_t PickBufferIndex()
+	{
+		if (!Header || Header->HoldBuffers == 0)
+		{
+			return NextBuffer;
+		}
+
+		// A single aligned 64-bit read: the client stores both indices together.
+		const uint64_t Held = *reinterpret_cast<const volatile uint64_t*>(&Header->ClientHeld);
+		std::atomic_thread_fence(std::memory_order_acquire);
+		const uint32_t Current = static_cast<uint32_t>(Held);
+		const uint32_t Previous = static_cast<uint32_t>(Held >> 32);
+
+		for (uint32_t Offset = 0; Offset < UXWV_FRAME_POOL_SIZE; ++Offset)
+		{
+			const uint32_t Candidate = (NextBuffer + Offset) % UXWV_FRAME_POOL_SIZE;
+			if (Candidate != Current && Candidate != Previous && Candidate != LastPublished)
+			{
+				return Candidate;
+			}
+		}
+
+		// Only reachable when a client reports bogus indices; overwriting is
+		// still better than stalling the page.
+		return NextBuffer;
+	}
+
 	void Publish(int bufferIndex, int width, int height)
 	{
 		if (!Header)
@@ -481,8 +514,10 @@ void FramePublisher::PublishFromHandle(void* sharedTextureHandle, int width, int
 		}
 	}
 
-	const int bufferIndex = static_cast<int>(Data->NextBuffer);
-	Data->NextBuffer = (Data->NextBuffer + 1) % UXWV_FRAME_POOL_SIZE;
+	const uint32_t picked = Data->PickBufferIndex();
+	Data->NextBuffer = (picked + 1) % UXWV_FRAME_POOL_SIZE;
+	Data->LastPublished = picked;
+	const int bufferIndex = static_cast<int>(picked);
 
 	// Pool textures come from D3D12 and carry no keyed mutex; the sequence
 	// published after WaitForGpu provides the needed ordering instead.

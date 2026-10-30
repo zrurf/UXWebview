@@ -133,6 +133,12 @@ int ParseArgs(int argc, char** argv, uxwv::HostOptions& options)
 
 int main(int argc, char** argv)
 {
+#if defined(_WIN32)
+	// Overlay browsers live inside the game window, so the host must use the
+	// same per-monitor DPI model as Unreal or the web UI gets bitmap scaled.
+	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+#endif
+
 	// CEF subprocesses (renderer, gpu, utility) must exit through this path
 	// before any other work happens. They inherit the parent command line, so
 	// the log switches are honored here as well; each process writes its own

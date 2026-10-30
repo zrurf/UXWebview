@@ -9,7 +9,10 @@
 #include "Windows/HideWindowsPlatformTypes.h"
 
 #include "CEF/UXWebviewSharedTexture.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/Texture2D.h"
+#include "GenericPlatform/GenericWindow.h"
 #include "HAL/PlatformMisc.h"
 #include "ID3D11DynamicRHI.h"
 #include "ID3D12DynamicRHI.h"
@@ -20,6 +23,7 @@
 #include "RHITransition.h"
 #include "TextureResource.h"
 #include "UXWebviewSettings.h"
+#include "Widgets/SWindow.h"
 #include "uxwebview_frame.h"
 #include "uxwebview_ipc.h"
 
@@ -36,6 +40,8 @@ DECLARE_CYCLE_STAT(TEXT("Frame Copy"), STAT_UXWebview_FrameCopy, STATGROUP_UXWeb
 namespace
 {
 constexpr int32 kMaxViewSize = 2048;
+/** Overlay windows follow the desktop surface, which may be wider than 2048. */
+constexpr int32 kMaxOverlaySize = 8192;
 // High refresh displays go well past 120 Hz; the ticker only ever asks for one
 // frame per game frame, so a higher ceiling costs nothing when it is unused.
 constexpr int32 kMaxFrameRate = 240;
@@ -44,21 +50,16 @@ constexpr double kScriptTimeoutSeconds = 30.0;
 constexpr double kBridgeTimeoutSeconds = 30.0;
 constexpr double kSummaryIntervalSeconds = 5.0;
 
-void RenderFrameCopy(FRHICommandListImmediate& RHICmdList,
-	const TSharedPtr<FUXWebviewCefRenderState>& State, FUXWebviewCefFrameSample Sample)
+/**
+ * Opens the pool handles once per generation and moves them to a shader
+ * readable state. Shared by the copy and the direct display path.
+ */
+bool EnsureCachedSources(FRHICommandListImmediate& RHICmdList,
+	const TSharedPtr<FUXWebviewCefRenderState>& State, const FUXWebviewCefFrameSample& Sample)
 {
-	SCOPE_CYCLE_COUNTER(STAT_UXWebview_FrameCopy);
-
-	FUXWebviewCefCopyResult Result;
-	Result.SlotIndex = Sample.SlotIndex;
-
-	if (!State.IsValid() || !Sample.DestTexture)
+	if (!State.IsValid())
 	{
-		if (State.IsValid())
-		{
-			State->Completed.Enqueue(Result);
-		}
-		return;
+		return false;
 	}
 
 	if (Sample.Generation != State->CachedGeneration
@@ -92,6 +93,31 @@ void RenderFrameCopy(FRHICommandListImmediate& RHICmdList,
 			UE_LOG(LogUXWebviewCEFProvider, Error,
 				TEXT("no shared texture for buffer %u"), Sample.BufferIndex);
 		}
+		return false;
+	}
+
+	return true;
+}
+
+void RenderFrameCopy(FRHICommandListImmediate& RHICmdList,
+	const TSharedPtr<FUXWebviewCefRenderState>& State, FUXWebviewCefFrameSample Sample)
+{
+	SCOPE_CYCLE_COUNTER(STAT_UXWebview_FrameCopy);
+
+	FUXWebviewCefCopyResult Result;
+	Result.SlotIndex = Sample.SlotIndex;
+
+	if (!State.IsValid() || !Sample.DestTexture)
+	{
+		if (State.IsValid())
+		{
+			State->Completed.Enqueue(Result);
+		}
+		return;
+	}
+
+	if (!EnsureCachedSources(RHICmdList, State, Sample))
+	{
 		State->Completed.Enqueue(Result);
 		return;
 	}
@@ -106,6 +132,36 @@ void RenderFrameCopy(FRHICommandListImmediate& RHICmdList,
 
 	Result.bSuccess = true;
 	State->Completed.Enqueue(Result);
+}
+
+/**
+ * Direct display: points the display texture at the newest shared buffer.
+ * Slate re-reads the resource's TextureRHI on every draw, so no copy is needed.
+ */
+void RenderBindFrame(FRHICommandListImmediate& RHICmdList,
+	const TSharedPtr<FUXWebviewCefRenderState>& State, FUXWebviewCefFrameSample Sample,
+	UTexture2D* Target)
+{
+	if (!State.IsValid() || !Target)
+	{
+		return;
+	}
+
+	if (!EnsureCachedSources(RHICmdList, State, Sample))
+	{
+		return;
+	}
+
+	FTextureResource* Resource = Target->GetResource();
+	if (!Resource)
+	{
+		// The resource is created on the render thread; the next frame retries.
+		return;
+	}
+
+	// The previous RHI texture is released here; the shared one stays alive
+	// through State->CachedSources.
+	Resource->TextureRHI = State->CachedSources[Sample.BufferIndex];
 }
 
 class FUXWebviewCEFFactory final : public IUXWebviewProviderFactory
@@ -184,6 +240,25 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 	bBeginFrameEnabled = TargetFrameRate > 0;
 	CurrentUrl = InitParams.InitialUrl;
 
+	// Overlay replaces the texture pipeline, so it needs a native parent window
+	// and the game window handle to fall back to texture mode when unavailable.
+	uint64 ParentHandle = 0;
+	if (InitParams.bOverlay)
+	{
+		ParentHandle = ResolveGameWindowHandle();
+		if (ParentHandle == 0)
+		{
+			UE_LOG(LogUXWebviewCEFProvider, Warning,
+				TEXT("overlay was requested but no game window is available; using texture mode"));
+		}
+	}
+	bOverlayMode = ParentHandle != 0;
+	if (bOverlayMode)
+	{
+		// Windowed browsers are paced by the compositor; begin frame stays off.
+		bBeginFrameEnabled = false;
+	}
+
 	FUXWebviewGovernorConfig GovernorConfig;
 	const float ActiveRate = bBeginFrameEnabled ? static_cast<float>(TargetFrameRate) : 60.0f;
 	GovernorConfig.ActiveFrameRate = ActiveRate;
@@ -192,13 +267,22 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 	Governor.SetVisible(true);
 	Governor.SetAnimated(true);
 
-	RenderState = MakeShared<FUXWebviewCefRenderState>();
-	if (!CreateFramePool(ViewSize.X, ViewSize.Y))
+	// Direct display keeps one texture and binds the shared frame into it, so
+	// the game thread pays no full-frame copy per frame.
+	bDirectDisplay = !bOverlayMode && UUXWebviewSettings::Get().bDirectDisplay;
+	if (!bOverlayMode)
 	{
-		RenderState.Reset();
-		Client = nullptr;
-		return FUXWebviewResult::Fail(EUXWebviewResultCode::Unknown,
-			TEXT("cef provider could not create its frame textures"));
+		RenderState = MakeShared<FUXWebviewCefRenderState>();
+		const bool bTexturesReady = bDirectDisplay
+			? CreateDirectTexture(ViewSize.X, ViewSize.Y)
+			: CreateFramePool(ViewSize.X, ViewSize.Y);
+		if (!bTexturesReady)
+		{
+			RenderState.Reset();
+			Client = nullptr;
+			return FUXWebviewResult::Fail(EUXWebviewResultCode::Unknown,
+				TEXT("cef provider could not create its frame textures"));
+		}
 	}
 
 	bInitialized = true;
@@ -209,7 +293,10 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 	Spec.DpiScale = DpiScale;
 	Spec.Url = CurrentUrl.IsEmpty() ? FString(TEXT("about:blank")) : CurrentUrl;
 	Spec.FrameRate = bBeginFrameEnabled ? TargetFrameRate : 60;
-	Spec.bVisible = true;
+	// Overlay stays hidden until the widget reports its rectangle.
+	Spec.bVisible = !bOverlayMode;
+	Spec.bOverlay = bOverlayMode;
+	Spec.ParentHandle = ParentHandle;
 
 	FUXWebviewResult Result = FUXWebviewHostClient::Get().CreateInstance(Spec, this, InstanceId);
 	if (!Result.bSuccess)
@@ -225,9 +312,32 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 		FTickerDelegate::CreateRaw(this, &FUXWebviewCEFProvider::Tick));
 
 	UE_LOG(LogUXWebviewCEFProvider, Log,
-		TEXT("cef view %u created: %dx%d scale=%.2f fps=%d url='%s'"),
-		InstanceId, ViewSize.X, ViewSize.Y, Spec.DpiScale, Spec.FrameRate, *Spec.Url);
+		TEXT("cef view %u created: %s %dx%d scale=%.2f fps=%d url='%s'"),
+		InstanceId, bOverlayMode ? TEXT("overlay")
+			: (bDirectDisplay ? TEXT("direct") : TEXT("texture")),
+		ViewSize.X, ViewSize.Y, Spec.DpiScale, Spec.FrameRate, *Spec.Url);
 	return FUXWebviewResult::Ok();
+}
+
+uint64 FUXWebviewCEFProvider::ResolveGameWindowHandle()
+{
+	if (!GEngine || !GEngine->GameViewport)
+	{
+		return 0;
+	}
+
+	TSharedPtr<SWindow> Window = GEngine->GameViewport->GetWindow();
+	if (!Window.IsValid())
+	{
+		return 0;
+	}
+
+	TSharedPtr<FGenericWindow> Native = Window->GetNativeWindow();
+	if (!Native.IsValid())
+	{
+		return 0;
+	}
+	return static_cast<uint64>(reinterpret_cast<uintptr_t>(Native->GetOSWindowHandle()));
 }
 
 void FUXWebviewCEFProvider::Shutdown()
@@ -327,6 +437,13 @@ FUXWebviewResult FUXWebviewCEFProvider::SetViewport(const FIntPoint& Size, float
 	}
 
 	DpiScale = InDpiScale > 0.0f ? FMath::Clamp(InDpiScale, 0.25f, 4.0f) : 1.0f;
+	if (bOverlayMode)
+	{
+		// Overlay geometry comes from SetOverlayBounds; the widget size is not
+		// authoritative for a native window.
+		return FUXWebviewResult::Ok();
+	}
+
 	const FIntPoint Clamped(
 		FMath::Clamp(Size.X, 64, kMaxViewSize),
 		FMath::Clamp(Size.Y, 64, kMaxViewSize));
@@ -342,6 +459,68 @@ FUXWebviewResult FUXWebviewCEFProvider::SetViewport(const FIntPoint& Size, float
 		}
 	}
 	return FUXWebviewResult::Ok();
+}
+
+FUXWebviewResult FUXWebviewCEFProvider::SetOverlayBounds(const FIntPoint& Position,
+	const FIntPoint& Size, float InDpiScale)
+{
+	const FUXWebviewResult Guard = GuardInitialized();
+	if (!Guard.bSuccess)
+	{
+		return Guard;
+	}
+	if (!bOverlayMode)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotSupported,
+			TEXT("the cef view is not running in overlay mode"));
+	}
+
+	const float Scale = InDpiScale > 0.0f ? FMath::Clamp(InDpiScale, 0.25f, 4.0f) : 1.0f;
+	const FIntPoint ClampedSize(
+		FMath::Clamp(Size.X, 64, kMaxOverlaySize),
+		FMath::Clamp(Size.Y, 64, kMaxOverlaySize));
+	const bool bChanged = ClampedSize != OverlaySize || Position != OverlayPosition
+		|| !FMath::IsNearlyEqual(Scale, OverlayDpiScale, 0.001f);
+	if (!bChanged)
+	{
+		return FUXWebviewResult::Ok();
+	}
+
+	OverlaySize = ClampedSize;
+	OverlayPosition = Position;
+	OverlayDpiScale = Scale;
+
+	if (InstanceId == 0)
+	{
+		return FUXWebviewResult::Ok();
+	}
+
+	FUXWebviewResult Result = ApplyOverlayBounds();
+	UE_LOG(LogUXWebviewCEFProvider, Log,
+		TEXT("instance %u overlay bounds %d,%d %dx%d scale=%.2f"),
+		InstanceId, Position.X, Position.Y, ClampedSize.X, ClampedSize.Y, Scale);
+	return Result;
+}
+
+FUXWebviewResult FUXWebviewCEFProvider::ApplyOverlayBounds()
+{
+	// Re-sends the last known rectangle; the host may not have been connected
+	// yet when the widget first reported it.
+	if (!bOverlayMode || InstanceId == 0 || OverlaySize == FIntPoint::ZeroValue)
+	{
+		return FUXWebviewResult::Ok();
+	}
+
+	const FUXWebviewResult Result = FUXWebviewHostClient::Get().SetBounds(
+		InstanceId, OverlayPosition, OverlaySize, OverlayDpiScale);
+	if (Result.bSuccess && !bOverlayShown)
+	{
+		// The native child window is created hidden so it never flashes at the
+		// origin; the first applied rectangle is what makes it appear.
+		bOverlayShown = true;
+		FUXWebviewHostClient::Get().SetVisible(InstanceId, true);
+	}
+	return Result;
 }
 
 FUXWebviewResult FUXWebviewCEFProvider::SetVisible(bool bInVisible)
@@ -369,6 +548,11 @@ FUXWebviewResult FUXWebviewCEFProvider::SetFrameRate(int32 FramesPerSecond)
 	}
 
 	TargetFrameRate = FMath::Clamp(FramesPerSecond, 0, kMaxFrameRate);
+	if (bOverlayMode)
+	{
+		// The compositor owns the cadence of a windowed browser.
+		return FUXWebviewResult::Ok();
+	}
 	bBeginFrameEnabled = TargetFrameRate > 0;
 
 	FUXWebviewGovernorConfig GovernorConfig = Governor.GetConfig();
@@ -442,6 +626,11 @@ FUXWebviewResult FUXWebviewCEFProvider::SendInput(const FUXWebviewInputEvent& Ev
 	}
 
 	Governor.NotifyInteraction();
+	if (bOverlayMode)
+	{
+		// The native window receives real input; forwarding would double it.
+		return FUXWebviewResult::Ok();
+	}
 	return FUXWebviewHostClient::Get().SendInput(InstanceId, Event);
 }
 
@@ -461,6 +650,10 @@ FUXWebviewResult FUXWebviewCEFProvider::RequestFrame()
 	if (!Guard.bSuccess)
 	{
 		return Guard;
+	}
+	if (bOverlayMode)
+	{
+		return FUXWebviewResult::Ok();
 	}
 	return FUXWebviewHostClient::Get().BeginFrame(InstanceId);
 }
@@ -488,8 +681,18 @@ FUXWebviewResult FUXWebviewCEFProvider::OpenDevTools()
 void FUXWebviewCEFProvider::OnHostReady()
 {
 	bReady = true;
-	MapSharedMemory();
-	UE_LOG(LogUXWebviewCEFProvider, Log, TEXT("host instance %u ready"), InstanceId);
+	if (!bOverlayMode)
+	{
+		MapSharedMemory();
+		UE_LOG(LogUXWebviewCEFProvider, Log, TEXT("host instance %u ready"), InstanceId);
+	}
+	else
+	{
+		UE_LOG(LogUXWebviewCEFProvider, Log,
+			TEXT("host instance %u ready (overlay compositing)"), InstanceId);
+		// The widget usually reports its rectangle before the host connects.
+		ApplyOverlayBounds();
+	}
 
 	if (Client)
 	{
@@ -564,7 +767,17 @@ void FUXWebviewCEFProvider::OnHostRecovered()
 	bFirstFrameLogged = false;
 
 	bReady = true;
-	MapSharedMemory();
+	if (!bOverlayMode)
+	{
+		MapSharedMemory();
+	}
+	else
+	{
+		// The recreated child window starts hidden and may sit at the old
+		// rectangle, so apply the last known geometry again.
+		bOverlayShown = false;
+		ApplyOverlayBounds();
+	}
 
 	UE_LOG(LogUXWebviewCEFProvider, Log, TEXT("instance %u recovered on a new host"), InstanceId);
 
@@ -635,6 +848,13 @@ bool FUXWebviewCEFProvider::Tick(float DeltaSeconds)
 
 	PollScriptTimeouts();
 	PollBridgeTimeouts();
+
+	// Overlay browsers are composited by Chromium inside the game window, so
+	// there is no shared memory, no copy and nothing to pace from here.
+	if (bOverlayMode)
+	{
+		return true;
+	}
 
 	if (!bHostLost)
 	{
@@ -728,13 +948,14 @@ bool FUXWebviewCEFProvider::MapSharedMemory()
 		return false;
 	}
 
-	FrameMapping = ::OpenFileMappingW(FILE_MAP_READ, 0, *SharedMemoryName);
+	FrameMapping = ::OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, *SharedMemoryName);
 	if (!FrameMapping)
 	{
 		return false;
 	}
 
-	const void* View = ::MapViewOfFile(FrameMapping, FILE_MAP_READ, 0, 0, sizeof(UxFrameHeader));
+	const void* View = ::MapViewOfFile(FrameMapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
+		sizeof(UxFrameHeader));
 	if (!View)
 	{
 		::CloseHandle(static_cast<HANDLE>(FrameMapping));
@@ -742,11 +963,24 @@ bool FUXWebviewCEFProvider::MapSharedMemory()
 		return false;
 	}
 
-	FrameHeader = View;
+	FrameHeader = const_cast<void*>(View);
 	LastSeq = 0;
 	bLoggedBadHeader = false;
+	HeldBuffer = INDEX_NONE;
+	PreviousHeldBuffer = INDEX_NONE;
+
+	// Direct display keeps pool buffers on screen, so the host must skip them
+	// when it picks a copy target; the copy path leaves this at zero.
+	UxFrameHeader* Header = static_cast<UxFrameHeader*>(FrameHeader);
+	if (Header->Magic == UXWV_FRAME_MAGIC && Header->Version == UXWV_FRAME_VERSION)
+	{
+		Header->HoldBuffers = bDirectDisplay ? 1u : 0u;
+		Header->ClientHeld = (static_cast<uint64>(UXWV_BUFFER_NONE) << 32) | UXWV_BUFFER_NONE;
+	}
+
 	UE_LOG(LogUXWebviewCEFProvider, Log,
-		TEXT("instance %u mapped frame memory '%s'"), InstanceId, *SharedMemoryName);
+		TEXT("instance %u mapped frame memory '%s' (%s)"), InstanceId, *SharedMemoryName,
+		bDirectDisplay ? TEXT("direct hold") : TEXT("copy"));
 	return true;
 }
 
@@ -762,6 +996,33 @@ void FUXWebviewCEFProvider::UnmapSharedMemory()
 		::CloseHandle(static_cast<HANDLE>(FrameMapping));
 		FrameMapping = nullptr;
 	}
+}
+
+void FUXWebviewCEFProvider::PublishHeldBuffer(uint32 BufferIndex)
+{
+	UxFrameHeader* Header = static_cast<UxFrameHeader*>(FrameHeader);
+	if (!Header || !bDirectDisplay)
+	{
+		return;
+	}
+
+	const int32 Current = static_cast<int32>(BufferIndex);
+	if (Current == HeldBuffer)
+	{
+		return;
+	}
+
+	PreviousHeldBuffer = HeldBuffer;
+	HeldBuffer = Current;
+
+	// The previous buffer can still be read by in flight GPU work, so the host
+	// gets both and never copies into the two most recent ones.
+	const uint32 PackedPrevious = PreviousHeldBuffer >= 0
+		? static_cast<uint32>(PreviousHeldBuffer) : UXWV_BUFFER_NONE;
+	const uint64 Packed = (static_cast<uint64>(PackedPrevious) << 32)
+		| static_cast<uint32>(Current);
+	FPlatformAtomics::InterlockedExchange(reinterpret_cast<volatile int64*>(&Header->ClientHeld),
+		static_cast<int64>(Packed));
 }
 
 bool FUXWebviewCEFProvider::SampleFrame()
@@ -808,44 +1069,59 @@ bool FUXWebviewCEFProvider::SampleFrame()
 
 	const int32 FrameWidth = static_cast<int32>(Local.Width);
 	const int32 FrameHeight = static_cast<int32>(Local.Height);
-	if (PoolTextures.Num() == 0 || FrameWidth != TextureWidth || FrameHeight != TextureHeight)
-	{
-		if (!CreateFramePool(FrameWidth, FrameHeight))
-		{
-			return false;
-		}
-	}
-
-	// A full pool means the previous copies are still running; keep the old
-	// display and retry this frame on the next tick.
-	const int32 SlotIndex = FrameSlots.AcquireCopySlot();
-	if (SlotIndex == INDEX_NONE || !PoolTextures.IsValidIndex(SlotIndex))
-	{
-		++PoolDrops;
-		return false;
-	}
-
-	// A fresh pool publishes its RHI textures on the render thread, so keep
-	// this frame pending until the destination exists instead of dropping it.
-	UTexture2D* DestTexture = PoolTextures[SlotIndex];
-	if (!DestTexture->GetResource() || !DestTexture->GetResource()->TextureRHI)
-	{
-		FrameSlots.CancelCopy(SlotIndex);
-		return false;
-	}
 
 	FUXWebviewCefFrameSample Sample;
 	Sample.Seq = Local.Seq;
 	Sample.Generation = Local.Generation;
 	Sample.BufferIndex = Local.BufferIndex;
-	Sample.SlotIndex = SlotIndex;
 	Sample.Width = FrameWidth;
 	Sample.Height = FrameHeight;
 	for (int32 Index = 0; Index < UXWV_FRAME_POOL_SIZE; ++Index)
 	{
 		Sample.Handles[Index] = Local.SharedHandles[Index];
 	}
-	Sample.DestTexture = DestTexture->GetResource()->TextureRHI;
+
+	if (bDirectDisplay)
+	{
+		if (!DirectTexture || FrameWidth != TextureWidth || FrameHeight != TextureHeight)
+		{
+			if (!CreateDirectTexture(FrameWidth, FrameHeight))
+			{
+				return false;
+			}
+		}
+	}
+	else
+	{
+		if (PoolTextures.Num() == 0 || FrameWidth != TextureWidth || FrameHeight != TextureHeight)
+		{
+			if (!CreateFramePool(FrameWidth, FrameHeight))
+			{
+				return false;
+			}
+		}
+
+		// A full pool means the previous copies are still running; keep the old
+		// display and retry this frame on the next tick.
+		const int32 SlotIndex = FrameSlots.AcquireCopySlot();
+		if (SlotIndex == INDEX_NONE || !PoolTextures.IsValidIndex(SlotIndex))
+		{
+			++PoolDrops;
+			return false;
+		}
+
+		// A fresh pool publishes its RHI textures on the render thread, so keep
+		// this frame pending until the destination exists instead of dropping it.
+		UTexture2D* DestTexture = PoolTextures[SlotIndex];
+		if (!DestTexture->GetResource() || !DestTexture->GetResource()->TextureRHI)
+		{
+			FrameSlots.CancelCopy(SlotIndex);
+			return false;
+		}
+
+		Sample.SlotIndex = SlotIndex;
+		Sample.DestTexture = DestTexture->GetResource()->TextureRHI;
+	}
 
 	if (Local.PublishTicks != 0)
 	{
@@ -864,6 +1140,27 @@ bool FUXWebviewCEFProvider::SampleFrame()
 	LastSeq = SeqA;
 
 	TSharedPtr<FUXWebviewCefRenderState> State = RenderState;
+	if (bDirectDisplay)
+	{
+		// Claim the buffer before the bind command runs so the host does not
+		// recycle it while this frame is on screen.
+		PublishHeldBuffer(Sample.BufferIndex);
+
+		UTexture2D* Target = DirectTexture;
+		ENQUEUE_RENDER_COMMAND(UXWebviewCefBindFrame)(
+			[State, Sample, Target](FRHICommandListImmediate& RHICmdList)
+			{
+				RenderBindFrame(RHICmdList, State, Sample, Target);
+			});
+
+		++ReceivedFrames;
+		// The bind command runs before Slate draws this frame, so the frame is
+		// on screen as soon as the tick finishes.
+		ReleaseRetiredTextures();
+		NotifyFrameShown();
+		return true;
+	}
+
 	ENQUEUE_RENDER_COMMAND(UXWebviewCefCopyFrame)(
 		[State, Sample](FRHICommandListImmediate& RHICmdList)
 		{
@@ -903,15 +1200,19 @@ void FUXWebviewCEFProvider::PollFrameSlotCompletions()
 	++PoolSwitches;
 	DisplayTexture = PoolTextures[NewDisplay];
 
+	// Release the old pool before notifying: the listener may destroy us.
+	ReleaseRetiredTextures();
+	NotifyFrameShown();
+}
+
+void FUXWebviewCEFProvider::NotifyFrameShown()
+{
 	if (!bFirstFrameLogged)
 	{
 		bFirstFrameLogged = true;
 		UE_LOG(LogUXWebviewCEFProvider, Log, TEXT("instance %u first frame %dx%d"),
 			InstanceId, TextureWidth, TextureHeight);
 	}
-
-	// Release the old pool before notifying: the listener may destroy us.
-	ReleaseRetiredTextures();
 
 	if (Client)
 	{
@@ -1054,6 +1355,42 @@ void FUXWebviewCEFProvider::PollBridgeTimeouts()
 	}
 }
 
+bool FUXWebviewCEFProvider::CreateDirectTexture(int32 InWidth, int32 InHeight)
+{
+	if (InWidth <= 0 || InHeight <= 0)
+	{
+		return false;
+	}
+
+	UTexture2D* NewTexture = UTexture2D::CreateTransient(InWidth, InHeight, PF_B8G8R8A8);
+	if (!NewTexture)
+	{
+		UE_LOG(LogUXWebviewCEFProvider, Error,
+			TEXT("CreateTransient failed for direct display %dx%d"), InWidth, InHeight);
+		return false;
+	}
+
+	NewTexture->AddToRoot();
+	NewTexture->SRGB = true;
+	NewTexture->Filter = TF_Bilinear;
+	NewTexture->AddressX = TA_Clamp;
+	NewTexture->AddressY = TA_Clamp;
+	NewTexture->UpdateResource();
+
+	// The old texture stays on screen until the new one has a frame, and the
+	// transient allocation of the placeholder is released on the first bind.
+	if (DirectTexture)
+	{
+		RetiredTextures.Add(DirectTexture);
+	}
+
+	DirectTexture = NewTexture;
+	DisplayTexture = NewTexture;
+	TextureWidth = InWidth;
+	TextureHeight = InHeight;
+	return true;
+}
+
 bool FUXWebviewCEFProvider::CreateFramePool(int32 InWidth, int32 InHeight)
 {
 	if (InWidth <= 0 || InHeight <= 0)
@@ -1130,6 +1467,14 @@ void FUXWebviewCEFProvider::ReleaseFramePool()
 		}
 	}
 	PoolTextures.Reset();
+
+	if (DirectTexture)
+	{
+		DirectTexture->RemoveFromRoot();
+		DirectTexture->MarkAsGarbage();
+		DirectTexture = nullptr;
+	}
+
 	TextureWidth = 0;
 	TextureHeight = 0;
 }

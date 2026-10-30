@@ -42,6 +42,10 @@ struct FUXWebviewHostInstanceSpec
 	FString Url;
 	int32 FrameRate = 60;
 	bool bVisible = true;
+	/** Overlay: the host creates a native child window inside the game window. */
+	bool bOverlay = false;
+	uint64 ParentHandle = 0;
+	FIntPoint Position = FIntPoint::ZeroValue;
 };
 
 /**
@@ -67,6 +71,9 @@ public:
 	FUXWebviewResult Reload(uint32 InstanceId);
 	FUXWebviewResult StopLoading(uint32 InstanceId);
 	FUXWebviewResult Resize(uint32 InstanceId, const FIntPoint& Size, float DpiScale);
+	/** Overlay only: moves the native child window inside the game client area. */
+	FUXWebviewResult SetBounds(uint32 InstanceId, const FIntPoint& Position,
+		const FIntPoint& Size, float DpiScale);
 	FUXWebviewResult SetVisible(uint32 InstanceId, bool bVisible);
 	FUXWebviewResult SetFrameRate(uint32 InstanceId, int32 FramesPerSecond);
 	FUXWebviewResult SetFocus(uint32 InstanceId, bool bFocused);

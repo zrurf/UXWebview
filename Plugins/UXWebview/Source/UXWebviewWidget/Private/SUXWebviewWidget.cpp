@@ -22,6 +22,8 @@ void SUXWebviewWidget::SetWebView(UUXWebview* InWebView)
 {
 	WebView = InWebView;
 	ViewportSize = FIntPoint::ZeroValue;
+	OverlayPosition = FIntPoint::ZeroValue;
+	OverlaySize = FIntPoint::ZeroValue;
 	LastTexture = nullptr;
 	if (Brush.IsValid())
 	{
@@ -60,8 +62,40 @@ bool SUXWebviewWidget::IsInteractable() const
 
 void SUXWebviewWidget::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
+	UUXWebview* View = WebView.Get();
+	if (View && View->IsOverlayMode())
+	{
+		// Overlay browsers are native child windows, so this widget neither
+		// paints a texture nor owns their geometry; it only tracks the panel.
+		UpdateOverlayBounds(AllottedGeometry, *View);
+		return;
+	}
+
 	UpdateViewport(AllottedGeometry);
 	UpdateBrush();
+}
+
+void SUXWebviewWidget::UpdateOverlayBounds(const FGeometry& AllottedGeometry, UUXWebview& View)
+{
+	// Render space is window client pixels, so absolute geometry can go straight
+	// to the host without any DPI conversion.
+	const FVector2f AbsolutePosition = AllottedGeometry.GetAbsolutePosition();
+	const FVector2f AbsoluteSize = AllottedGeometry.GetAbsoluteSize();
+	const FIntPoint PixelPosition = FIntPoint(
+		FMath::RoundToInt(AbsolutePosition.X), FMath::RoundToInt(AbsolutePosition.Y));
+	const FIntPoint PixelSize = FIntPoint(
+		FMath::Max(1, FMath::RoundToInt(AbsoluteSize.X)),
+		FMath::Max(1, FMath::RoundToInt(AbsoluteSize.Y)));
+	if (PixelPosition == OverlayPosition && PixelSize == OverlaySize)
+	{
+		return;
+	}
+
+	OverlayPosition = PixelPosition;
+	OverlaySize = PixelSize;
+	const float LayoutScale = AllottedGeometry.Scale > 0.0f ? AllottedGeometry.Scale : 1.0f;
+	EffectiveDpiScale = DpiScale > 0.0f ? DpiScale : LayoutScale;
+	View.SetOverlayBounds(PixelPosition, PixelSize, EffectiveDpiScale);
 }
 
 void SUXWebviewWidget::UpdateViewport(const FGeometry& AllottedGeometry)
@@ -125,6 +159,12 @@ int32 SUXWebviewWidget::OnPaint(
 	UUXWebview* View = WebView.Get();
 	if (!Brush.IsValid() || LastTexture == nullptr || !View || View->GetState() == EUXWebviewState::Destroyed)
 	{
+		return LayerId;
+	}
+	if (View->IsOverlayMode())
+	{
+		// Chromium draws the child window over this panel; painting a texture
+		// here would only burn overdraw.
 		return LayerId;
 	}
 

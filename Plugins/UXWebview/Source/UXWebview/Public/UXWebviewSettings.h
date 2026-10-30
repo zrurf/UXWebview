@@ -30,6 +30,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Bridge")
 	TArray<FString> BridgeAllowedOrigins;
 
+	/** Texture mode shows the shared frame texture directly instead of copying it
+	 *  into a local pool texture every frame; disable to fall back to the copy path. */
+	UPROPERTY(config, EditAnywhere, Category = "Performance")
+	bool bDirectDisplay = true;
+
 	UPROPERTY(config, EditAnywhere, Category = "Debug")
 	bool bEnableDevTools = false;
 

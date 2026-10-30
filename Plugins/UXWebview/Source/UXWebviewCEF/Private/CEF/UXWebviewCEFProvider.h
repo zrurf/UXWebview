@@ -39,7 +39,7 @@ struct FUXWebviewCefFrameSample
 	int32 SlotIndex = INDEX_NONE;
 	int32 Width = 0;
 	int32 Height = 0;
-	uint64 Handles[UXWV_FRAME_POOL_SIZE] = { 0, 0, 0 };
+	uint64 Handles[UXWV_FRAME_POOL_SIZE] = {};
 	FRHITexture* DestTexture = nullptr;
 };
 
@@ -77,6 +77,9 @@ public:
 	virtual FUXWebviewResult StopLoading() override;
 
 	virtual FUXWebviewResult SetViewport(const FIntPoint& Size, float InDpiScale) override;
+	virtual FUXWebviewResult SetOverlayBounds(const FIntPoint& Position, const FIntPoint& Size,
+		float InDpiScale) override;
+	virtual bool IsOverlayMode() const override { return bOverlayMode; }
 	virtual FUXWebviewResult SetVisible(bool bInVisible) override;
 	virtual FUXWebviewResult SetFrameRate(int32 FramesPerSecond) override;
 	virtual FUXWebviewResult SetZoom(float ZoomFactor) override;
@@ -110,18 +113,27 @@ private:
 	bool Tick(float DeltaSeconds);
 
 	bool CreateFramePool(int32 InWidth, int32 InHeight);
+	/** Direct display: one texture whose RHI surface is swapped to the newest shared buffer. */
+	bool CreateDirectTexture(int32 InWidth, int32 InHeight);
 	void ReleaseFramePool();
 	void ReleaseRetiredTextures();
+	/** Logs the first frame and tells the client a frame is on screen. */
+	void NotifyFrameShown();
 
 	bool MapSharedMemory();
 	void UnmapSharedMemory();
 	bool SampleFrame();
+	/** Direct display only: tells the host which pool buffers are on screen. */
+	void PublishHeldBuffer(uint32 BufferIndex);
 	void PollFrameSlotCompletions();
 	void DrainCopyStats();
 	void ResetRenderSources();
 	void RequestFrameIfDue(float TargetRate);
+	/** Sends the last overlay rectangle again; also handles first show. */
+	FUXWebviewResult ApplyOverlayBounds();
 	void PollScriptTimeouts();
 	void PollBridgeTimeouts();
+	static uint64 ResolveGameWindowHandle();
 
 	IUXWebviewViewClient* Client = nullptr;
 	uint32 InstanceId = 0;
@@ -130,6 +142,15 @@ private:
 	bool bHostLost = false;
 	bool bAutoRecover = true;
 	bool bBeginFrameEnabled = true;
+	/** Overlay compositing: no frame pool, no begin-frame requests, native input. */
+	bool bOverlayMode = false;
+	/** Texture mode without the per-frame copy: Slate samples the shared surface. */
+	bool bDirectDisplay = false;
+	/** Overlay stays hidden until the widget reports its first rectangle. */
+	bool bOverlayShown = false;
+	FIntPoint OverlayPosition = FIntPoint::ZeroValue;
+	FIntPoint OverlaySize = FIntPoint::ZeroValue;
+	float OverlayDpiScale = 1.0f;
 
 	FIntPoint ViewSize = FIntPoint(1280, 720);
 	float DpiScale = 1.0f;
@@ -139,10 +160,13 @@ private:
 	FString CurrentUrl;
 
 	void* FrameMapping = nullptr;
-	const void* FrameHeader = nullptr;
+	void* FrameHeader = nullptr;
 	FString SharedMemoryName;
 	uint32 LastSeq = 0;
 	bool bLoggedBadHeader = false;
+	/** Pool buffers direct display currently shows; the host must not write them. */
+	int32 HeldBuffer = INDEX_NONE;
+	int32 PreviousHeldBuffer = INDEX_NONE;
 
 	FUXWebviewFrameGovernor Governor;
 	/** Next BEGIN_FRAME is due at this time; keeps the cadence drift free. */
@@ -151,6 +175,8 @@ private:
 	TArray<UTexture2D*> PoolTextures;
 	TArray<UTexture2D*> RetiredTextures;
 	UTexture2D* DisplayTexture = nullptr;
+	/** Only used by direct display; the same object as DisplayTexture. */
+	UTexture2D* DirectTexture = nullptr;
 	int32 TextureWidth = 0;
 	int32 TextureHeight = 0;
 	FUXWebviewFrameSlotRing FrameSlots{3};

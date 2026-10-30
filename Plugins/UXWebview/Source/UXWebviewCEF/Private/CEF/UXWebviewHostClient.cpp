@@ -629,6 +629,16 @@ void FUXWebviewHostClient::FlushPendingCreates()
 		Object->SetBoolField(TEXT("visible"), Instance.Spec.bVisible);
 		Object->SetStringField(TEXT("url"), Instance.Spec.Url);
 
+		if (Instance.Spec.bOverlay)
+		{
+			// Handles exceed the exact range of JSON numbers, so send decimals as text.
+			Object->SetBoolField(TEXT("overlay"), true);
+			Object->SetStringField(TEXT("parent"),
+				FString::Printf(TEXT("%llu"), Instance.Spec.ParentHandle));
+			Object->SetNumberField(TEXT("x"), Instance.Spec.Position.X);
+			Object->SetNumberField(TEXT("y"), Instance.Spec.Position.Y);
+		}
+
 		TArray<TSharedPtr<FJsonValue>> Origins;
 		for (const FString& Origin : UUXWebviewSettings::Get().BridgeAllowedOrigins)
 		{
@@ -875,6 +885,30 @@ FUXWebviewResult FUXWebviewHostClient::Resize(uint32 InstanceId, const FIntPoint
 	Object->SetNumberField(TEXT("scale"), DpiScale);
 	return SendJson(UXWV_IPC_RESIZE, InstanceId, 0, static_cast<uint32>(Size.X),
 		static_cast<uint32>(Size.Y), SerializeJson(Object))
+		? FUXWebviewResult::Ok()
+		: FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady, TEXT("host is not connected"));
+}
+
+FUXWebviewResult FUXWebviewHostClient::SetBounds(uint32 InstanceId, const FIntPoint& Position,
+	const FIntPoint& Size, float DpiScale)
+{
+	FInstance* Instance = Instances.Find(InstanceId);
+	if (!Instance)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotFound, TEXT("unknown host instance"));
+	}
+
+	Instance->Spec.Position = Position;
+	Instance->Spec.Size = Size;
+	Instance->Spec.DpiScale = DpiScale;
+
+	TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+	Object->SetNumberField(TEXT("x"), Position.X);
+	Object->SetNumberField(TEXT("y"), Position.Y);
+	Object->SetNumberField(TEXT("w"), Size.X);
+	Object->SetNumberField(TEXT("h"), Size.Y);
+	Object->SetNumberField(TEXT("scale"), DpiScale);
+	return SendJson(UXWV_IPC_SET_BOUNDS, InstanceId, 0, 0, 0, SerializeJson(Object))
 		? FUXWebviewResult::Ok()
 		: FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady, TEXT("host is not connected"));
 }

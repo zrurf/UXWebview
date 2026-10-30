@@ -47,8 +47,11 @@ static FTextureRHIRef OpenD3D12(uint64 HandleValue)
 		return nullptr;
 	}
 
+	// The host publishes sRGB encoded pixels; the flag makes SRV reads match the
+	// sRGB destination the copy path renders into.
 	FTextureRHIRef Wrapped = RHI->RHICreateTexture2DFromResource(
-		PF_B8G8R8A8, TexCreate_ShaderResource, FClearValueBinding::None, Resource);
+		PF_B8G8R8A8, TexCreate_ShaderResource | TexCreate_SRGB,
+		FClearValueBinding::None, Resource);
 	Resource->Release();
 	return Wrapped;
 }
@@ -84,7 +87,8 @@ static FTextureRHIRef OpenD3D11(uint64 HandleValue)
 	}
 
 	FTextureRHIRef Wrapped = RHI->RHICreateTexture2DFromResource(
-		PF_B8G8R8A8, TexCreate_ShaderResource, FClearValueBinding::None, Resource);
+		PF_B8G8R8A8, TexCreate_ShaderResource | TexCreate_SRGB,
+		FClearValueBinding::None, Resource);
 	Resource->Release();
 	return Wrapped;
 }
