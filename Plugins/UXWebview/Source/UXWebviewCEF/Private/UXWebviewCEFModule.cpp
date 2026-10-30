@@ -89,6 +89,60 @@ void SpikeRun(const TArray<FString>& Args, UWorld* World)
 		}));
 }
 
+void SpikeVisible(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const bool bVisible = Args.Num() > 0 ? FCString::Atoi(*Args[0]) != 0 : true;
+	FUXWebviewSpike::Get().SetVisible(bVisible);
+}
+
+// Starts the spike, hides the widget after a warm-up and reports how many
+// frames the host produced while nothing was visible.
+void SpikeHiddenRun(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+
+	const float HideSeconds = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 5.0f;
+	if (!FUXWebviewSpike::Get().Start(1920, 1080, FString(), 60))
+	{
+		UE_LOG(LogUXWebviewCEF, Warning, TEXT("spike start failed"));
+		return;
+	}
+
+	TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
+	TSharedPtr<uint64> HiddenStartFrames = MakeShared<uint64>(0);
+	TSharedPtr<bool> bHidden = MakeShared<bool>(false);
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+		[Elapsed, HiddenStartFrames, bHidden, HideSeconds](float DeltaTime)
+		{
+			*Elapsed += DeltaTime;
+
+			if (!*bHidden && *Elapsed >= 2.0f)
+			{
+				*bHidden = true;
+				*HiddenStartFrames = FUXWebviewSpike::Get().GetReceivedFrames();
+				FUXWebviewSpike::Get().SetVisible(false);
+			}
+
+			if (*bHidden && *Elapsed >= 2.0f + HideSeconds)
+			{
+				const uint64 DeltaFrames =
+					FUXWebviewSpike::Get().GetReceivedFrames() - *HiddenStartFrames;
+				UE_LOG(LogUXWebviewCEF, Log, TEXT("hidden window %.1fs: %llu frames received"),
+					HideSeconds, DeltaFrames);
+
+				FUXWebviewSpike::Get().SetVisible(true);
+				FUXWebviewSpike::Get().Stop();
+				if (!GIsEditor)
+				{
+					FPlatformMisc::RequestExit(false);
+				}
+				return false;
+			}
+			return true;
+		}));
+}
+
 FAutoConsoleCommandWithWorldAndArgs GSpikeStartCommand(
 	TEXT("UXWebview.SpikeStart"),
 	TEXT("UXWebview.SpikeStart [url] [width] [height] [fps]"),
@@ -120,6 +174,16 @@ FAutoConsoleCommandWithWorldAndArgs GSpikeRunCommand(
 	TEXT("UXWebview.SpikeRun"),
 	TEXT("UXWebview.SpikeRun [seconds] [width] [height] [fps]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SpikeRun));
+
+FAutoConsoleCommandWithWorldAndArgs GSpikeVisibleCommand(
+	TEXT("UXWebview.SpikeVisible"),
+	TEXT("UXWebview.SpikeVisible <0|1> hides or shows the spike widget"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SpikeVisible));
+
+FAutoConsoleCommandWithWorldAndArgs GSpikeHiddenRunCommand(
+	TEXT("UXWebview.SpikeHiddenRun"),
+	TEXT("UXWebview.SpikeHiddenRun [hiddenSeconds] measures frames produced while hidden"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SpikeHiddenRun));
 } // namespace
 #endif
 

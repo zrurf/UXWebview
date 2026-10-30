@@ -7,6 +7,8 @@
 #include "Containers/Array.h"
 #include "Containers/Queue.h"
 #include "Containers/Ticker.h"
+#include "Frame/UXWebviewFrameGovernor.h"
+#include "Frame/UXWebviewFrameSlotRing.h"
 #include "HAL/PlatformProcess.h"
 #include "RHI.h"
 #include "Templates/SharedPointer.h"
@@ -23,10 +25,18 @@ struct FUXWebviewFrameSample
 	uint32 Seq = 0;
 	uint32 Generation = 0;
 	uint32 BufferIndex = 0;
+	int32 SlotIndex = INDEX_NONE;
 	int32 Width = 0;
 	int32 Height = 0;
 	uint64 Handles[3] = { 0, 0, 0 };
 	FRHITexture* DestTexture = nullptr;
+};
+
+// Render thread outcome of one copy, drained on the game thread.
+struct FUXWebviewCopyResult
+{
+	int32 SlotIndex = INDEX_NONE;
+	bool bSuccess = false;
 };
 
 // Spike-only bridge used to validate the CEF shared texture pipeline (M1).
@@ -40,6 +50,11 @@ public:
 	void Stop();
 	bool IsRunning() const { return bConnected; }
 
+	// Hiding the widget stops frame requests entirely.
+	void SetVisible(bool bVisible);
+	bool IsVisible() const { return Governor.IsVisible(); }
+	uint64 GetReceivedFrames() const { return ReceivedFrames; }
+
 	FString GetStatus() const;
 	void ReadbackPixels();
 
@@ -50,10 +65,13 @@ private:
 	bool StartHostProcess();
 	bool TryConnectAndSetup();
 	bool CreateTextureAndWidget(int32 InWidth, int32 InHeight);
+	bool CreateFramePool(int32 InWidth, int32 InHeight);
+	void ReleaseRetiredTextures();
+	void PollFrameSlotCompletions();
 	bool Tick(float DeltaTime);
-	bool SampleFrame(bool& bOutCopiedThisTick);
+	bool SampleFrame();
 	void SendIpc(uint32 Type, uint32 A = 0, uint32 B = 0);
-	void RequestFrameIfDue();
+	void RequestFrameIfDue(float FrameRate);
 	void DrainStats();
 
 	void EnqueueFrameCopy(const FUXWebviewFrameSample& Sample);
@@ -80,6 +98,8 @@ private:
 	int32 Width = 1920;
 	int32 Height = 1080;
 	int32 TargetFps = 0;
+	bool bBeginFrameMode = false;
+	FUXWebviewFrameGovernor Governor;
 
 	bool bConnected = false;
 	bool bHelloSent = false;
@@ -99,7 +119,20 @@ private:
 
 	FTSTicker::FDelegateHandle TickerHandle;
 
-	UTexture2D* Texture = nullptr;
+	// Destination textures are triple buffered; the brush only points at a
+	// texture once its copy finished on the render thread.
+	TArray<UTexture2D*> PoolTextures;
+	// Old pool kept alive until the first frame of the new pool is displayed.
+	TArray<UTexture2D*> RetiredTextures;
+	UTexture2D* DisplayTexture = nullptr;
+	int32 DisplayWidth = 0;
+	int32 DisplayHeight = 0;
+	FUXWebviewFrameSlotRing FrameSlots{3};
+	// Render thread reports finished copies here; drained on the game thread.
+	TQueue<FUXWebviewCopyResult, EQueueMode::Spsc> CompletedCopySlots;
+	uint64 PoolDrops = 0;
+	uint64 PoolSwitches = 0;
+
 	TSharedPtr<SImage> ImageWidget;
 	TSharedPtr<FSlateBrush> Brush;
 

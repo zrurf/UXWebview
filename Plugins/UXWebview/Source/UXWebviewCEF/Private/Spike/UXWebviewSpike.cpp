@@ -178,6 +178,15 @@ bool FUXWebviewSpike::Start(int32 InWidth, int32 InHeight, const FString& InUrl,
 	Width = FMath::Clamp(InWidth, 64, kMaxViewSize);
 	Height = FMath::Clamp(InHeight, 64, kMaxViewSize);
 	TargetFps = FMath::Clamp(InTargetFps, 0, 240);
+	bBeginFrameMode = TargetFps > 0;
+
+	FUXWebviewGovernorConfig GovernorConfig;
+	const float ActiveRate = TargetFps > 0 ? static_cast<float>(TargetFps) : 60.0f;
+	GovernorConfig.ActiveFrameRate = ActiveRate;
+	GovernorConfig.MaxFrameRate = FMath::Max(ActiveRate, 120.0f);
+	Governor.SetConfig(GovernorConfig);
+	Governor.SetVisible(true);
+	Governor.SetAnimated(true);
 	Url = InUrl.IsEmpty() ? DefaultBenchUrl() : InUrl;
 
 	if (!Url.Contains(TEXT("://")) && FPaths::FileExists(Url))
@@ -200,6 +209,8 @@ bool FUXWebviewSpike::Start(int32 InWidth, int32 InHeight, const FString& InUrl,
 	WindowFrames = 0;
 	WindowSeconds = 0.0;
 	LastBeginFrameSeconds = 0.0;
+	PoolDrops = 0;
+	PoolSwitches = 0;
 	ConnectionAttempts = 0;
 	bHelloSent = false;
 	bConnected = false;
@@ -337,7 +348,7 @@ bool FUXWebviewSpike::TryConnectAndSetup()
 		UE_LOG(LogUXWebviewSpike, Log, TEXT("frame shared memory mapped"));
 	}
 
-	if (!Texture)
+	if (PoolTextures.Num() == 0)
 	{
 		if (!GEngine || !GEngine->GameViewport)
 		{
@@ -366,30 +377,10 @@ bool FUXWebviewSpike::CreateTextureAndWidget(int32 InWidth, int32 InHeight)
 		return false;
 	}
 
-	UTexture2D* NewTexture = UTexture2D::CreateTransient(InWidth, InHeight, PF_B8G8R8A8);
-	if (!NewTexture)
+	if (!CreateFramePool(InWidth, InHeight))
 	{
-		UE_LOG(LogUXWebviewSpike, Error, TEXT("CreateTransient failed for %dx%d"), InWidth, InHeight);
 		return false;
 	}
-	NewTexture->AddToRoot();
-	NewTexture->SRGB = true;
-	NewTexture->Filter = TF_Bilinear;
-	NewTexture->AddressX = TA_Clamp;
-	NewTexture->AddressY = TA_Clamp;
-	NewTexture->UpdateResource();
-
-	if (Texture)
-	{
-		// Frame copies may still reference the old texture on the render thread.
-		FlushRenderingCommands();
-		Texture->RemoveFromRoot();
-		Texture->MarkAsGarbage();
-	}
-
-	Texture = NewTexture;
-	TextureWidth = InWidth;
-	TextureHeight = InHeight;
 
 	if (!Brush)
 	{
@@ -397,7 +388,6 @@ bool FUXWebviewSpike::CreateTextureAndWidget(int32 InWidth, int32 InHeight)
 		Brush->DrawAs = ESlateBrushDrawType::Image;
 	}
 	Brush->ImageSize = FVector2D(InWidth, InHeight);
-	Brush->SetResourceObject(Texture);
 
 	if (!ImageWidget)
 	{
@@ -405,8 +395,106 @@ bool FUXWebviewSpike::CreateTextureAndWidget(int32 InWidth, int32 InHeight)
 		GEngine->GameViewport->AddViewportWidgetContent(ImageWidget.ToSharedRef(), 0);
 	}
 
-	UE_LOG(LogUXWebviewSpike, Log, TEXT("frame texture %dx%d ready"), InWidth, InHeight);
+	UE_LOG(LogUXWebviewSpike, Log, TEXT("frame pool %dx%d ready"), InWidth, InHeight);
 	return true;
+}
+
+bool FUXWebviewSpike::CreateFramePool(int32 InWidth, int32 InHeight)
+{
+	// The old pool stays on screen until a frame of the new pool is finished.
+	RetiredTextures.Append(PoolTextures);
+	PoolTextures.Reset();
+
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		UTexture2D* NewTexture = UTexture2D::CreateTransient(InWidth, InHeight, PF_B8G8R8A8);
+		if (!NewTexture)
+		{
+			UE_LOG(LogUXWebviewSpike, Error, TEXT("CreateTransient failed for %dx%d"), InWidth, InHeight);
+			for (UTexture2D* Texture : PoolTextures)
+			{
+				Texture->RemoveFromRoot();
+				Texture->MarkAsGarbage();
+			}
+			PoolTextures.Reset();
+			return false;
+		}
+
+		NewTexture->AddToRoot();
+		NewTexture->SRGB = true;
+		NewTexture->Filter = TF_Bilinear;
+		NewTexture->AddressX = TA_Clamp;
+		NewTexture->AddressY = TA_Clamp;
+		NewTexture->UpdateResource();
+		PoolTextures.Add(NewTexture);
+	}
+
+	FrameSlots.Reset(PoolTextures.Num());
+	TextureWidth = InWidth;
+	TextureHeight = InHeight;
+	return true;
+}
+
+void FUXWebviewSpike::ReleaseRetiredTextures()
+{
+	if (RetiredTextures.Num() == 0)
+	{
+		return;
+	}
+
+	// Copies into the retired pool are already flushed; drop them safely.
+	if (IsInGameThread())
+	{
+		FlushRenderingCommands();
+	}
+	for (UTexture2D* Texture : RetiredTextures)
+	{
+		if (Texture)
+		{
+			Texture->RemoveFromRoot();
+			Texture->MarkAsGarbage();
+		}
+	}
+	RetiredTextures.Reset();
+}
+
+void FUXWebviewSpike::PollFrameSlotCompletions()
+{
+	FUXWebviewCopyResult Result;
+	while (CompletedCopySlots.Dequeue(Result))
+	{
+		if (Result.bSuccess)
+		{
+			FrameSlots.CompleteCopy(Result.SlotIndex);
+		}
+		else
+		{
+			FrameSlots.CancelCopy(Result.SlotIndex);
+		}
+	}
+
+	const int32 NewDisplay = FrameSlots.TakeNewestReadySlot();
+	if (NewDisplay == INDEX_NONE || !PoolTextures.IsValidIndex(NewDisplay))
+	{
+		return;
+	}
+
+	++PoolSwitches;
+	DisplayTexture = PoolTextures[NewDisplay];
+	DisplayWidth = TextureWidth;
+	DisplayHeight = TextureHeight;
+
+	if (Brush.IsValid())
+	{
+		Brush->SetResourceObject(DisplayTexture);
+		Brush->ImageSize = FVector2D(DisplayWidth, DisplayHeight);
+		if (ImageWidget.IsValid() && FSlateApplication::IsInitialized())
+		{
+			ImageWidget->Invalidate(EInvalidateWidgetReason::Paint);
+		}
+	}
+
+	ReleaseRetiredTextures();
 }
 
 bool FUXWebviewSpike::Tick(float DeltaTime)
@@ -443,17 +531,12 @@ bool FUXWebviewSpike::Tick(float DeltaTime)
 		return false;
 	}
 
-	bool bCopied = false;
-	SampleFrame(bCopied);
+	SampleFrame();
+	PollFrameSlotCompletions();
 	DrainStats();
 	PollPixelReadback();
 
-	if (bCopied && ImageWidget.IsValid() && FSlateApplication::IsInitialized())
-	{
-		ImageWidget->Invalidate(EInvalidateWidgetReason::Paint);
-	}
-
-	RequestFrameIfDue();
+	RequestFrameIfDue(Governor.Update(DeltaTime));
 
 	if (Now >= NextHealthCheck)
 	{
@@ -477,14 +560,17 @@ bool FUXWebviewSpike::Tick(float DeltaTime)
 		ReceivedPerSecond = static_cast<uint32>(ReceivedFrames - WindowFrames);
 		WindowFrames = ReceivedFrames;
 		WindowSeconds = Now;
+		UE_LOG(LogUXWebviewSpike, Log,
+			TEXT("spike: target=%.0f recv/s=%u recv=%llu switches=%llu drops=%llu"),
+			Governor.GetTargetFrameRate(), ReceivedPerSecond, ReceivedFrames,
+			PoolSwitches, PoolDrops);
 	}
 
 	return true;
 }
 
-bool FUXWebviewSpike::SampleFrame(bool& bOutCopiedThisTick)
+bool FUXWebviewSpike::SampleFrame()
 {
-	bOutCopiedThisTick = false;
 	if (!FrameHeader)
 	{
 		return false;
@@ -529,16 +615,27 @@ bool FUXWebviewSpike::SampleFrame(bool& bOutCopiedThisTick)
 
 	const int32 FrameWidth = static_cast<int32>(Local.Width);
 	const int32 FrameHeight = static_cast<int32>(Local.Height);
-	if (!Texture || FrameWidth != TextureWidth || FrameHeight != TextureHeight)
+	if (PoolTextures.Num() == 0 || FrameWidth != TextureWidth || FrameHeight != TextureHeight)
 	{
-		if (!CreateTextureAndWidget(FrameWidth, FrameHeight))
+		if (!CreateFramePool(FrameWidth, FrameHeight))
 		{
 			return false;
 		}
 	}
 
-	if (!Texture->GetResource() || !Texture->GetResource()->TextureRHI)
+	// A full pool means the previous copies have not finished; keep the old
+	// display and retry this frame on the next tick.
+	const int32 SlotIndex = FrameSlots.AcquireCopySlot();
+	if (SlotIndex == INDEX_NONE || !PoolTextures.IsValidIndex(SlotIndex))
 	{
+		++PoolDrops;
+		return false;
+	}
+
+	UTexture2D* DestTexture = PoolTextures[SlotIndex];
+	if (!DestTexture->GetResource() || !DestTexture->GetResource()->TextureRHI)
+	{
+		FrameSlots.CancelCopy(SlotIndex);
 		return false;
 	}
 
@@ -546,19 +643,19 @@ bool FUXWebviewSpike::SampleFrame(bool& bOutCopiedThisTick)
 	Sample.Seq = Local.Seq;
 	Sample.Generation = Local.Generation;
 	Sample.BufferIndex = Local.BufferIndex;
+	Sample.SlotIndex = SlotIndex;
 	Sample.Width = FrameWidth;
 	Sample.Height = FrameHeight;
 	for (int32 Index = 0; Index < UXWV_FRAME_POOL_SIZE; ++Index)
 	{
 		Sample.Handles[Index] = Local.SharedHandles[Index];
 	}
-	Sample.DestTexture = Texture->GetResource()->TextureRHI;
+	Sample.DestTexture = DestTexture->GetResource()->TextureRHI;
 
 	ReportedGeneration = Local.Generation;
 	EnqueueFrameCopy(Sample);
 
 	++ReceivedFrames;
-	bOutCopiedThisTick = true;
 	return true;
 }
 
@@ -573,8 +670,12 @@ void FUXWebviewSpike::EnqueueFrameCopy(const FUXWebviewFrameSample& Sample)
 
 void FUXWebviewSpike::RenderFrameCopy(FRHICommandListImmediate& RHICmdList, FUXWebviewFrameSample Sample)
 {
+	FUXWebviewCopyResult Result;
+	Result.SlotIndex = Sample.SlotIndex;
+
 	if (!Sample.DestTexture)
 	{
+		CompletedCopySlots.Enqueue(Result);
 		return;
 	}
 
@@ -607,6 +708,7 @@ void FUXWebviewSpike::RenderFrameCopy(FRHICommandListImmediate& RHICmdList, FUXW
 			bLoggedOpenFailure = true;
 			UE_LOG(LogUXWebviewSpike, Error, TEXT("no shared texture for buffer %u"), Sample.BufferIndex);
 		}
+		CompletedCopySlots.Enqueue(Result);
 		return;
 	}
 
@@ -616,6 +718,9 @@ void FUXWebviewSpike::RenderFrameCopy(FRHICommandListImmediate& RHICmdList, FUXW
 	const double ElapsedMs = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - StartCycles);
 
 	CopyMicros.Enqueue(static_cast<uint32>(FMath::RoundToInt(ElapsedMs * 1000.0)));
+
+	Result.bSuccess = true;
+	CompletedCopySlots.Enqueue(Result);
 }
 
 void FUXWebviewSpike::ReadbackPixels()
@@ -625,9 +730,9 @@ void FUXWebviewSpike::ReadbackPixels()
 
 void FUXWebviewSpike::RequestPixelReadback()
 {
-	if (!Texture || !Texture->GetResource())
+	if (!DisplayTexture || !DisplayTexture->GetResource())
 	{
-		UE_LOG(LogUXWebviewSpike, Warning, TEXT("pixel readback skipped: no texture"));
+		UE_LOG(LogUXWebviewSpike, Warning, TEXT("pixel readback skipped: no displayed frame"));
 		return;
 	}
 
@@ -637,10 +742,10 @@ void FUXWebviewSpike::RequestPixelReadback()
 	}
 	PixelReadback->ResetReady();
 
-	FRHITexture* Source = Texture->GetResource()->TextureRHI;
+	FRHITexture* Source = DisplayTexture->GetResource()->TextureRHI;
 	FRHIGPUTextureReadback* Readback = PixelReadback.Get();
-	const int32 ReadWidth = TextureWidth;
-	const int32 ReadHeight = TextureHeight;
+	const int32 ReadWidth = DisplayWidth;
+	const int32 ReadHeight = DisplayHeight;
 
 	ENQUEUE_RENDER_COMMAND(UXWebviewSpikePixelReadback)(
 		[Readback, Source, ReadWidth, ReadHeight](FRHICommandListImmediate& RHICmdList)
@@ -664,8 +769,8 @@ void FUXWebviewSpike::PollPixelReadback()
 
 	// Mapping a staging surface requires the render thread.
 	FRHIGPUTextureReadback* Readback = PixelReadback.Get();
-	const int32 ReadWidth = TextureWidth;
-	const int32 ReadHeight = TextureHeight;
+	const int32 ReadWidth = DisplayWidth;
+	const int32 ReadHeight = DisplayHeight;
 
 	ENQUEUE_RENDER_COMMAND(UXWebviewSpikePixelSample)(
 		[Readback, ReadWidth, ReadHeight](FRHICommandListImmediate&)
@@ -730,15 +835,15 @@ void FUXWebviewSpike::DrainStats()
 	}
 }
 
-void FUXWebviewSpike::RequestFrameIfDue()
+void FUXWebviewSpike::RequestFrameIfDue(float FrameRate)
 {
-	if (TargetFps <= 0 || !PipeHandle)
+	if (!bBeginFrameMode || FrameRate <= 0.0f || !PipeHandle)
 	{
 		return;
 	}
 
 	const double Now = FPlatformTime::Seconds();
-	const double Interval = 1.0 / static_cast<double>(TargetFps);
+	const double Interval = 1.0 / static_cast<double>(FrameRate);
 	if (LastBeginFrameSeconds == 0.0 || Now - LastBeginFrameSeconds >= Interval)
 	{
 		SendIpc(UXWV_IPC_BEGIN_FRAME);
@@ -829,23 +934,36 @@ void FUXWebviewSpike::Stop()
 		FrameMapping = nullptr;
 	}
 
-	if (Texture)
+	if (IsInGameThread() && GDynamicRHI)
 	{
 		// Release the wrapped shared textures on the render thread first.
-		if (IsInGameThread() && GDynamicRHI)
-		{
-			ENQUEUE_RENDER_COMMAND(UXWebviewSpikeReleaseSources)(
-				[this](FRHICommandListImmediate&)
-				{
-					CachedSources.Empty();
-					CachedGeneration = 0;
-				});
-			FlushRenderingCommands();
-		}
+		ENQUEUE_RENDER_COMMAND(UXWebviewSpikeReleaseSources)(
+			[this](FRHICommandListImmediate&)
+			{
+				CachedSources.Empty();
+				CachedGeneration = 0;
+			});
+		FlushRenderingCommands();
+	}
 
-		Texture->RemoveFromRoot();
-		Texture->MarkAsGarbage();
-		Texture = nullptr;
+	ReleaseRetiredTextures();
+	for (UTexture2D* PoolTexture : PoolTextures)
+	{
+		if (PoolTexture)
+		{
+			PoolTexture->RemoveFromRoot();
+			PoolTexture->MarkAsGarbage();
+		}
+	}
+	PoolTextures.Reset();
+	DisplayTexture = nullptr;
+	DisplayWidth = 0;
+	DisplayHeight = 0;
+	FrameSlots.Reset(3);
+
+	FUXWebviewCopyResult CopyResult;
+	while (CompletedCopySlots.Dequeue(CopyResult))
+	{
 	}
 
 	uint32 Dummy = 0;
@@ -868,11 +986,24 @@ void FUXWebviewSpike::Stop()
 	WindowSeconds = 0.0;
 	LastBeginFrameSeconds = 0.0;
 	bLoggedOpenFailure = false;
+	PoolDrops = 0;
+	PoolSwitches = 0;
 	PixelReadback.Reset();
 	bPixelReadbackPending = false;
 	bTearingDown = false;
 
 	UE_LOG(LogUXWebviewSpike, Log, TEXT("spike stopped"));
+}
+
+void FUXWebviewSpike::SetVisible(bool bVisible)
+{
+	Governor.SetVisible(bVisible);
+	if (ImageWidget.IsValid())
+	{
+		ImageWidget->SetVisibility(bVisible ? EVisibility::Visible : EVisibility::Collapsed);
+	}
+	UE_LOG(LogUXWebviewSpike, Log, TEXT("spike visibility %s"),
+		bVisible ? TEXT("on") : TEXT("off"));
 }
 
 FString FUXWebviewSpike::GetStatus() const
@@ -882,11 +1013,12 @@ FString FUXWebviewSpike::GetStatus() const
 		: 0.0;
 
 	return FString::Printf(
-		TEXT("running=%s connected=%s size=%dx%d seq=%u recv=%llu recv/s=%u copies=%llu copyAvg=%.1fus copyMax=%u us host='%s'"),
+		TEXT("running=%s connected=%s size=%dx%d seq=%u recv=%llu recv/s=%u copies=%llu copyAvg=%.1fus copyMax=%u us switches=%llu drops=%llu target=%.0f host='%s'"),
 		IsRunning() ? TEXT("yes") : TEXT("no"),
 		bConnected ? TEXT("yes") : TEXT("no"),
 		Width, Height, LastSeq, ReceivedFrames, ReceivedPerSecond,
-		CopyCount, AvgMicros, CopyMaxMicros, *HostExePath);
+		CopyCount, AvgMicros, CopyMaxMicros, PoolSwitches, PoolDrops,
+		Governor.GetTargetFrameRate(), *HostExePath);
 }
 
 #endif // PLATFORM_WINDOWS
