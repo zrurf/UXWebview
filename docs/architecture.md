@@ -89,7 +89,7 @@ flags, not on provider names.
 | `bGpuSharedTexture` | false | true | false |
 | `bCpuPixelBuffer` | true | false | true |
 | `bOverlayMode` | false | true | true |
-| `bTransparency` | false | false | follows `bCompositionOverlay` |
+| `bTransparency` | false | false | true while a composition controller hosts the view |
 | `bExternalBeginFrame` | false | true | false |
 | `bDevTools` | false | follows `bEnableDevTools` | follows `bEnableDevTools` |
 | `bOfflineCache` | false | true | true |
@@ -121,6 +121,15 @@ frame rate, `bTransparency` is reported and `bTransparent` requests a transparen
 page background. Runtimes without composition support log a warning and fall back
 to the regular windowed controller on the same host window.
 
+`SetCompositionOverlay` moves a running overlay between the two controller types,
+so a page can start transparent and gain a keyboard when it needs one. The switch
+tears the controller down and creates the other kind on the same host window:
+web view events are dropped, pending script and bridge callbacks are failed, and
+the current URL is loaded again. Page state, scroll position and page-side
+JavaScript state do not survive, and `OnReady` fires only once, when the view
+first becomes ready. The widget keeps its bounds and `bTransparency` follows the
+new mode.
+
 ## Input and IME
 
 `SUXWebviewWidget` converts Slate-local positions to page CSS pixels with
@@ -137,9 +146,11 @@ messages only reach the page while the browser window owns the OS keyboard
 focus, so the provider moves OS focus to that window before key events. Because
 the window never receives a native IME, composition is forwarded to page JavaScript
 (`window.__uxwvIme`) and committed into the focused editable element. Overlay
-mode input is handled by the native browser child window, which also means
-`SendInput` reports success without forwarding anything there: only texture mode
-and WebView2 composition overlay views can inject synthetic events.
+mode input is handled by the native browser child window, which also means the
+OS delivers real clicks straight to Chromium; `SendInput` still forwards
+synthetic events to that same child window (`SendMessageW` for WebView2, IPC for
+CEF), so a physical event is never delivered twice. Every provider accepts
+synthetic mouse and key events in overlay mode, and CEF overlays also accept IME.
 
 The off-screen host window stays shown (`SW_SHOWNOACTIVATE` at negative
 coordinates) while the view is visible: Chromium drops wheel input sent to a

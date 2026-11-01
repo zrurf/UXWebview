@@ -627,11 +627,9 @@ FUXWebviewResult FUXWebviewCEFProvider::SendInput(const FUXWebviewInputEvent& Ev
 	}
 
 	Governor.NotifyInteraction();
-	if (bOverlayMode)
-	{
-		// The native window receives real input; forwarding would double it.
-		return FUXWebviewResult::Ok();
-	}
+	// Overlay instances forward as well: real input reaches their native window
+	// through the OS, and SendInput calls arrive over the IPC path, so one
+	// physical event never produces two page events.
 	return FUXWebviewHostClient::Get().SendInput(InstanceId, Event);
 }
 

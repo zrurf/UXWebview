@@ -503,9 +503,8 @@ void BrowserManager::BeginFrame(uint32_t id)
 void BrowserManager::SendInput(uint32_t id, const UxInputEvent& event, const std::string& text)
 {
 	auto it = Instances.find(id);
-	if (it == Instances.end() || !it->second->Browser || it->second->bOverlay)
+	if (it == Instances.end() || !it->second->Browser)
 	{
-		// Overlay windows receive real keyboard and mouse messages themselves.
 		return;
 	}
 

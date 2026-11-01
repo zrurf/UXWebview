@@ -286,6 +286,8 @@ struct FUXWebviewWebView2State
 	HWND InputWindow = nullptr;
 	/** Window procedure saved when composition hosting subclasses the host. */
 	WNDPROC OriginalHostProc = nullptr;
+	/** User data the host carried before composition hosting replaced it. */
+	LONG_PTR OriginalHostUserData = 0;
 	HCURSOR PageCursor = nullptr;
 	bool bMouseTracking = false;
 
@@ -294,6 +296,8 @@ struct FUXWebviewWebView2State
 	bool bReady = false;
 	bool bOverlayMode = false;
 	bool bCompositionHosting = false;
+	/** Set while the page moves to the other controller and the URL is reloaded. */
+	bool bSwitchingController = false;
 	bool bTransparentBackground = false;
 	bool bVisible = true;
 	bool bComInitialized = false;
@@ -362,17 +366,6 @@ UINT32 CompositionVirtualKeys(WPARAM ButtonState)
 	return Keys;
 }
 
-/**
- * SendMouseInput takes device independent pixels relative to the view, while
- * window messages carry physical client pixels, so both paths go through here.
- */
-POINT CompositionPoint(const FUXWebviewWebView2State& State, int32 X, int32 Y)
-{
-	const float Scale = State.OverlayDpiScale > 0.0f ? State.OverlayDpiScale : 1.0f;
-	POINT Point = { FMath::RoundToInt(X / Scale), FMath::RoundToInt(Y / Scale) };
-	return Point;
-}
-
 void SendCompositionMouse(FUXWebviewWebView2State& State,
 	COREWEBVIEW2_MOUSE_EVENT_KIND Kind, UINT32 VirtualKeys, UINT32 MouseData, POINT Point)
 {
@@ -392,8 +385,9 @@ int32 PackedCoordinate(LPARAM LParam, bool bHigh)
 
 /**
  * Composition overlay has no browser child window, so the host window receives
- * mouse messages and forwards them with SendMouseInput. Keyboard stays broken
- * here: the SDK exposes no injection API for composition controllers.
+ * mouse messages and forwards them with SendMouseInput, which takes the same
+ * client pixels. Keyboard stays broken here: the SDK exposes no injection API
+ * for composition controllers.
  */
 LRESULT CALLBACK CompositionHostProc(HWND Window, UINT Message, WPARAM WParam, LPARAM LParam)
 {
@@ -431,7 +425,7 @@ LRESULT CALLBACK CompositionHostProc(HWND Window, UINT Message, WPARAM WParam, L
 		}
 		SendCompositionMouse(*State, COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
 			CompositionVirtualKeys(WParam), 0,
-			CompositionPoint(*State, PackedCoordinate(LParam, false), PackedCoordinate(LParam, true)));
+			POINT{ PackedCoordinate(LParam, false), PackedCoordinate(LParam, true) });
 		return 0;
 	}
 
@@ -474,7 +468,7 @@ LRESULT CALLBACK CompositionHostProc(HWND Window, UINT Message, WPARAM WParam, L
 		SendCompositionMouse(*State, Kind,
 			CompositionVirtualKeys(WParam) | CompositionVirtualKeys(State->MouseButtons),
 			MouseData,
-			CompositionPoint(*State, PackedCoordinate(LParam, false), PackedCoordinate(LParam, true)));
+			POINT{ PackedCoordinate(LParam, false), PackedCoordinate(LParam, true) });
 		if (State->Controller)
 		{
 			State->Controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
@@ -507,7 +501,7 @@ LRESULT CALLBACK CompositionHostProc(HWND Window, UINT Message, WPARAM WParam, L
 			State->MouseButtons &= ~MK_MBUTTON;
 		}
 		SendCompositionMouse(*State, Kind, CompositionVirtualKeys(WParam), MouseData,
-			CompositionPoint(*State, PackedCoordinate(LParam, false), PackedCoordinate(LParam, true)));
+			POINT{ PackedCoordinate(LParam, false), PackedCoordinate(LParam, true) });
 		if (State->MouseButtons == 0 && ::GetCapture() == Window)
 		{
 			::ReleaseCapture();
@@ -530,8 +524,7 @@ LRESULT CALLBACK CompositionHostProc(HWND Window, UINT Message, WPARAM WParam, L
 			? COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL
 			: COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL;
 		SendCompositionMouse(*State, Kind, CompositionVirtualKeys(WParam),
-			static_cast<UINT32>(Delta),
-			CompositionPoint(*State, Point.x, Point.y));
+			static_cast<UINT32>(Delta), Point);
 		return 0;
 	}
 
@@ -725,8 +718,12 @@ FUXWebviewCapabilities FUXWebviewWebView2Provider::GetCapabilities() const
 	Capabilities.bCpuPixelBuffer = true;
 	Capabilities.bOverlayMode = true;
 	// Only a composition overlay can show the page over the game with a
-	// transparent background; texture mode always renders an opaque page.
-	Capabilities.bTransparency = UUXWebviewSettings::Get().bCompositionOverlay;
+	// transparent background; texture mode always renders an opaque page. A live
+	// view reports its current controller, a provider probed before Initialize
+	// reports what the project setting would choose.
+	Capabilities.bTransparency = State.IsValid()
+		? State->bCompositionHosting
+		: UUXWebviewSettings::Get().bCompositionOverlay;
 	Capabilities.bOfflineCache = true;
 	Capabilities.bDevTools = UUXWebviewSettings::Get().bEnableDevTools;
 	Capabilities.MaxFrameRate = kMaxFrameRate;
@@ -867,17 +864,9 @@ void FUXWebviewWebView2Provider::CreateHostWindow(bool bOverlay, uint64 ParentHa
 
 	ShowWindow(State->HostWindow, bOverlay ? SW_HIDE : SW_SHOWNOACTIVATE);
 
-	if (bOverlay && State->bCompositionHosting)
-	{
-		// Nothing inside the host turns window messages into page input, so the
-		// provider takes over the window procedure and forwards them itself.
-		State->OriginalHostProc = reinterpret_cast<WNDPROC>(
-			GetWindowLongPtrW(State->HostWindow, GWLP_WNDPROC));
-		SetWindowLongPtrW(State->HostWindow, GWLP_USERDATA,
-			reinterpret_cast<LONG_PTR>(State.Get()));
-		SetWindowLongPtrW(State->HostWindow, GWLP_WNDPROC,
-			reinterpret_cast<LONG_PTR>(&CompositionHostProc));
-	}
+	// Nothing inside a composition host turns window messages into page input,
+	// so the provider takes over the window procedure and forwards them itself.
+	ApplyCompositionHosting(State->bCompositionHosting);
 }
 
 void FUXWebviewWebView2Provider::DestroyHostWindow()
@@ -890,7 +879,48 @@ void FUXWebviewWebView2Provider::DestroyHostWindow()
 	{
 		State->HostWindow = nullptr;
 		State->InputWindow = nullptr;
+		State->OriginalHostProc = nullptr;
+		State->OriginalHostUserData = 0;
 	}
+}
+
+/**
+ * Composition hosting forwards input by replacing the host window procedure.
+ * Restoring the pair also survives a switch back to a regular controller, which
+ * then lets Chromium handle its own messages again.
+ */
+void FUXWebviewWebView2Provider::ApplyCompositionHosting(bool bComposition)
+{
+	if (!State.IsValid() || !State->HostWindow)
+	{
+		return;
+	}
+
+	if (bComposition)
+	{
+		if (!State->OriginalHostProc)
+		{
+			State->OriginalHostProc = reinterpret_cast<WNDPROC>(
+				GetWindowLongPtrW(State->HostWindow, GWLP_WNDPROC));
+			State->OriginalHostUserData =
+				GetWindowLongPtrW(State->HostWindow, GWLP_USERDATA);
+		}
+		SetWindowLongPtrW(State->HostWindow, GWLP_USERDATA,
+			reinterpret_cast<LONG_PTR>(State.Get()));
+		SetWindowLongPtrW(State->HostWindow, GWLP_WNDPROC,
+			reinterpret_cast<LONG_PTR>(&CompositionHostProc));
+		return;
+	}
+
+	if (!State->OriginalHostProc)
+	{
+		return;
+	}
+	SetWindowLongPtrW(State->HostWindow, GWLP_WNDPROC,
+		reinterpret_cast<LONG_PTR>(State->OriginalHostProc));
+	SetWindowLongPtrW(State->HostWindow, GWLP_USERDATA, State->OriginalHostUserData);
+	State->OriginalHostProc = nullptr;
+	State->OriginalHostUserData = 0;
 }
 
 void FUXWebviewWebView2Provider::ApplyGeometry()
@@ -1133,112 +1163,20 @@ FUXWebviewResult FUXWebviewWebView2Provider::StartEnvironment()
 
 				Captured->Environment = Environment;
 
-				if (Captured->bCompositionHosting)
+				if (!Captured->Owner->CreateController(Captured->bCompositionHosting))
 				{
-					ComPtr<ICoreWebView2Environment3> Environment3;
-					if (SUCCEEDED(Environment->QueryInterface(IID_PPV_ARGS(&Environment3)))
-						&& Environment3)
-					{
-						const HRESULT CompositionResult =
-							Environment3->CreateCoreWebView2CompositionController(
-								Captured->HostWindow,
-								Microsoft::WRL::Callback<
-									ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
-									[Captured](HRESULT ControllerError,
-										ICoreWebView2CompositionController* CompositionController) -> HRESULT
-									{
-										if (Captured->bShutdown || !Captured->Owner)
-										{
-											return S_OK;
-										}
-										if (FAILED(ControllerError) || !CompositionController)
-										{
-											Captured->Owner->OnInitializationFailed(FString::Printf(
-												TEXT("WebView2 composition controller creation failed (0x%08X)"),
-												static_cast<uint32>(ControllerError)));
-											return S_OK;
-										}
-
-										ComPtr<ICoreWebView2Controller> Controller;
-										if (FAILED(CompositionController->QueryInterface(
-											IID_PPV_ARGS(&Controller))) || !Controller)
-										{
-											Captured->Owner->OnInitializationFailed(
-												TEXT("WebView2 composition controller is not a controller"));
-											return S_OK;
-										}
-										Captured->CompositionController = CompositionController;
-										Captured->Controller = Controller;
-										if (!Captured->Owner->SetupCompositionVisual())
-										{
-											Captured->Owner->OnInitializationFailed(
-												TEXT("WebView2 composition hosting could not build its visual tree"));
-											return S_OK;
-										}
-
-										ComPtr<ICoreWebView2> WebView;
-										if (FAILED(Controller->get_CoreWebView2(&WebView)) || !WebView)
-										{
-											Captured->Owner->OnInitializationFailed(
-												TEXT("WebView2 did not expose its core view"));
-											return S_OK;
-										}
-										Captured->WebView = WebView;
-										Captured->Owner->ConfigureWebView();
-										return S_OK;
-									}).Get());
-						if (FAILED(CompositionResult) && Captured->Owner)
-						{
-							Captured->Owner->OnInitializationFailed(FString::Printf(
-								TEXT("WebView2 composition controller request failed (0x%08X)"),
-								static_cast<uint32>(CompositionResult)));
-						}
-						return S_OK;
-					}
-
 					// Without environment3 the regular windowed controller is the only
 					// way to host the page; keep the view working and say so.
+					Captured->Owner->ApplyCompositionHosting(false);
 					Captured->bCompositionHosting = false;
 					UE_LOG(LogUXWebviewWebView2, Warning,
-						TEXT("webview2 runtime has no composition controller; using a windowed overlay"));
-				}
-
-				const HRESULT ControllerResult = Environment->CreateCoreWebView2Controller(
-					Captured->HostWindow,
-					Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-						[Captured](HRESULT ControllerError,
-							ICoreWebView2Controller* Controller) -> HRESULT
-						{
-							if (Captured->bShutdown || !Captured->Owner)
-							{
-								return S_OK;
-							}
-							if (FAILED(ControllerError) || !Controller)
-							{
-								Captured->Owner->OnInitializationFailed(FString::Printf(
-									TEXT("WebView2 controller creation failed (0x%08X)"),
-									static_cast<uint32>(ControllerError)));
-								return S_OK;
-							}
-
-							Captured->Controller = Controller;
-							ComPtr<ICoreWebView2> WebView;
-							if (FAILED(Controller->get_CoreWebView2(&WebView)) || !WebView)
-							{
-								Captured->Owner->OnInitializationFailed(
-									TEXT("WebView2 did not expose its core view"));
-								return S_OK;
-							}
-							Captured->WebView = WebView;
-							Captured->Owner->ConfigureWebView();
-							return S_OK;
-						}).Get());
-
-				if (FAILED(ControllerResult) && Captured->Owner)
-				{
-					Captured->Owner->OnInitializationFailed(FString::Printf(
-						TEXT("WebView2 controller request failed (0x%08X)"),
-						static_cast<uint32>(ControllerResult)));
+						TEXT("webview2 runtime has no composition controller; "
+							"using a windowed overlay"));
+					if (!Captured->Owner->CreateController(false))
+					{
+						Captured->Owner->OnInitializationFailed(
+							TEXT("WebView2 controller request could not be started"));
+					}
 				}
 				return S_OK;
 			}).Get());
@@ -1250,6 +1188,125 @@ FUXWebviewResult FUXWebviewWebView2Provider::StartEnvironment()
 				static_cast<uint32>(Hr)));
 	}
 	return FUXWebviewResult::Ok();
+}
+
+bool FUXWebviewWebView2Provider::CreateController(bool bComposition)
+{
+	if (!State.IsValid() || !State->Environment || !State->HostWindow)
+	{
+		return false;
+	}
+
+	// A switch closes the old controller, so a cached input window would point at
+	// the Chromium child window of the previous controller.
+	State->InputWindow = nullptr;
+	State->bInputWindowMissingLogged = false;
+
+	const TSharedPtr<FUXWebviewWebView2State> Captured = State;
+
+	if (bComposition)
+	{
+		ComPtr<ICoreWebView2Environment3> Environment3;
+		if (FAILED(State->Environment->QueryInterface(IID_PPV_ARGS(&Environment3)))
+			|| !Environment3)
+		{
+			return false;
+		}
+
+		const HRESULT Requested = Environment3->CreateCoreWebView2CompositionController(
+			State->HostWindow,
+			Microsoft::WRL::Callback<
+				ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
+				[Captured](HRESULT Error,
+					ICoreWebView2CompositionController* CompositionController) -> HRESULT
+				{
+					if (Captured->bShutdown || !Captured->Owner)
+					{
+						return S_OK;
+					}
+					if (FAILED(Error) || !CompositionController)
+					{
+						Captured->Owner->OnInitializationFailed(FString::Printf(
+							TEXT("WebView2 composition controller creation failed (0x%08X)"),
+							static_cast<uint32>(Error)));
+						return S_OK;
+					}
+
+					ComPtr<ICoreWebView2Controller> Controller;
+					if (FAILED(CompositionController->QueryInterface(
+						IID_PPV_ARGS(&Controller))) || !Controller)
+					{
+						Captured->Owner->OnInitializationFailed(
+							TEXT("WebView2 composition controller is not a controller"));
+						return S_OK;
+					}
+					Captured->CompositionController = CompositionController;
+					Captured->Controller = Controller;
+					if (!Captured->Owner->SetupCompositionVisual())
+					{
+						Captured->Owner->OnInitializationFailed(
+							TEXT("WebView2 composition hosting could not build its visual tree"));
+						return S_OK;
+					}
+
+					ComPtr<ICoreWebView2> WebView;
+					if (FAILED(Controller->get_CoreWebView2(&WebView)) || !WebView)
+					{
+						Captured->Owner->OnInitializationFailed(
+							TEXT("WebView2 did not expose its core view"));
+						return S_OK;
+					}
+					Captured->WebView = WebView;
+					Captured->Owner->ConfigureWebView();
+					return S_OK;
+				}).Get());
+		if (FAILED(Requested))
+		{
+			OnInitializationFailed(FString::Printf(
+				TEXT("WebView2 composition controller request failed (0x%08X)"),
+				static_cast<uint32>(Requested)));
+			return false;
+		}
+		return true;
+	}
+
+	const HRESULT Requested = State->Environment->CreateCoreWebView2Controller(
+		State->HostWindow,
+		Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+			[Captured](HRESULT Error, ICoreWebView2Controller* Controller) -> HRESULT
+			{
+				if (Captured->bShutdown || !Captured->Owner)
+				{
+					return S_OK;
+				}
+				if (FAILED(Error) || !Controller)
+				{
+					Captured->Owner->OnInitializationFailed(FString::Printf(
+						TEXT("WebView2 controller creation failed (0x%08X)"),
+						static_cast<uint32>(Error)));
+					return S_OK;
+				}
+
+				Captured->Controller = Controller;
+				ComPtr<ICoreWebView2> WebView;
+				if (FAILED(Controller->get_CoreWebView2(&WebView)) || !WebView)
+				{
+					Captured->Owner->OnInitializationFailed(
+						TEXT("WebView2 did not expose its core view"));
+					return S_OK;
+				}
+				Captured->WebView = WebView;
+				Captured->Owner->ConfigureWebView();
+				return S_OK;
+			}).Get());
+	if (FAILED(Requested))
+	{
+		OnInitializationFailed(FString::Printf(
+			TEXT("WebView2 controller request failed (0x%08X)"),
+			static_cast<uint32>(Requested)));
+		return false;
+	}
+	return true;
 }
 
 void FUXWebviewWebView2Provider::ConfigureWebView()
@@ -1387,9 +1444,24 @@ void FUXWebviewWebView2Provider::StartNavigation()
 	State->WebView->Navigate(*State->CurrentUrl);
 	State->bReady = true;
 
+	// A controller switch keeps the same view alive from the caller's point of
+	// view, so it must not fire another ready notification.
+	const bool bRehosted = State->bSwitchingController;
+	State->bSwitchingController = false;
+
+	if (bRehosted)
+	{
+		UE_LOG(LogUXWebviewWebView2, Log,
+			TEXT("webview2 controller rehosted as a %s overlay, navigating to '%s'"),
+			State->bCompositionHosting ? TEXT("composition") : TEXT("windowed"),
+			*State->CurrentUrl);
+		return;
+	}
+
 	UE_LOG(LogUXWebviewWebView2, Log,
-		TEXT("webview2 %s ready, navigating to '%s'"),
-		State->bOverlayMode ? TEXT("overlay") : TEXT("texture"), *State->CurrentUrl);
+		TEXT("webview2 %s%s ready, navigating to '%s'"),
+		State->bOverlayMode ? TEXT("overlay") : TEXT("texture"),
+		State->bCompositionHosting ? TEXT(" (composition)") : TEXT(""), *State->CurrentUrl);
 
 	if (State->Client)
 	{
@@ -1487,6 +1559,102 @@ FUXWebviewResult FUXWebviewWebView2Provider::GuardReady() const
 bool FUXWebviewWebView2Provider::IsOverlayMode() const
 {
 	return State.IsValid() && State->bOverlayMode;
+}
+
+bool FUXWebviewWebView2Provider::IsCompositionOverlay() const
+{
+	return State.IsValid() && State->bCompositionHosting;
+}
+
+/**
+ * The page lives inside its controller, so changing modes closes it and builds
+ * a new one on the same environment and host window. The current URL is
+ * reloaded and page state is lost; transparency and windowed keyboard support
+ * trade places.
+ */
+FUXWebviewResult FUXWebviewWebView2Provider::SetCompositionOverlay(bool bComposition)
+{
+	const FUXWebviewResult Guard = GuardInitialized();
+	if (!Guard.bSuccess)
+	{
+		return Guard;
+	}
+	if (!State->bOverlayMode)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotSupported,
+			TEXT("composition hosting only applies to overlay views"));
+	}
+	if (State->bCompositionHosting == bComposition)
+	{
+		return FUXWebviewResult::Ok();
+	}
+	if (!State->Controller)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady,
+			TEXT("the webview2 controller is not ready yet"));
+	}
+	if (State->bSwitchingController)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidState,
+			TEXT("a webview2 controller switch is already in progress"));
+	}
+
+	State->bSwitchingController = true;
+	State->bReady = false;
+
+	if (State->WebView)
+	{
+		State->WebView->remove_NavigationCompleted(State->NavigationCompletedToken);
+		State->WebView->remove_ProcessFailed(State->ProcessFailedToken);
+		State->WebView->remove_WebMessageReceived(State->WebMessageToken);
+	}
+	State->NavigationCompletedToken = {};
+	State->ProcessFailedToken = {};
+	State->WebMessageToken = {};
+
+	// Pending script and bridge requests belong to the document that is about to
+	// be destroyed; their callbacks would never be answered.
+	State->PendingScripts.Reset();
+	State->PendingBridge.Reset();
+
+	ReleaseCompositionVisual();
+	State->Controller->Close();
+	State->WebView.Reset();
+	State->Controller.Reset();
+	State->InputWindow = nullptr;
+
+	State->bCompositionHosting = bComposition;
+	ApplyCompositionHosting(bComposition);
+
+	if (!CreateController(bComposition))
+	{
+		if (!bComposition)
+		{
+			State->bSwitchingController = false;
+			return FUXWebviewResult::Fail(EUXWebviewResultCode::Unknown,
+				TEXT("WebView2 could not create another controller"));
+		}
+
+		// Composition can be unavailable (no environment3, no visual tree). A
+		// windowed overlay still works, so the view never ends up dead.
+		UE_LOG(LogUXWebviewWebView2, Warning,
+			TEXT("webview2 composition hosting is unavailable; rehosting windowed"));
+		State->bCompositionHosting = false;
+		ApplyCompositionHosting(false);
+		if (!CreateController(false))
+		{
+			State->bSwitchingController = false;
+			return FUXWebviewResult::Fail(EUXWebviewResultCode::Unknown,
+				TEXT("WebView2 could not create another controller"));
+		}
+	}
+
+	UE_LOG(LogUXWebviewWebView2, Log,
+		TEXT("webview2 controller switch requested: %s"),
+		State->bCompositionHosting
+			? TEXT("composition overlay (transparent, no typed input)")
+			: TEXT("windowed overlay (keyboard and IME available)"));
+	return FUXWebviewResult::Ok();
 }
 
 FUXWebviewResult FUXWebviewWebView2Provider::LoadURL(const FString& Url)
@@ -1766,11 +1934,10 @@ FUXWebviewResult FUXWebviewWebView2Provider::SendInput(const FUXWebviewInputEven
 		// push events from game code.
 		return SendCompositionInput(Event);
 	}
-	if (State->bOverlayMode)
-	{
-		// The native window receives real input; forwarding would double it.
-		return FUXWebviewResult::Ok();
-	}
+	// Texture and regular overlay views both take events through the Chromium
+	// child window. Real input reaches that window through the OS, while calls
+	// to SendInput arrive here, so the two sources never deliver the same event
+	// twice.
 	return SendWin32Input(Event);
 }
 
@@ -1799,10 +1966,12 @@ FUXWebviewResult FUXWebviewWebView2Provider::SendCompositionInput(
 		break;
 	}
 
-	// Event positions are CSS pixels, which equal DIPs, so they are passed
-	// through while window messages are converted from physical pixels.
-	POINT Point = { FMath::RoundToInt(Event.Position.X),
-		FMath::RoundToInt(Event.Position.Y) };
+	// Widget events arrive in CSS pixels. SendMouseInput works in host client
+	// pixels, which Chromium maps back to CSS through the rasterization scale,
+	// so the position is scaled the way the browser window sizes are.
+	const float Scale = State->OverlayDpiScale > 0.0f ? State->OverlayDpiScale : 1.0f;
+	POINT Point = { FMath::RoundToInt(Event.Position.X * Scale),
+		FMath::RoundToInt(Event.Position.Y * Scale) };
 	UINT32 VirtualKeys = 0;
 	if (Event.bShift)
 	{
@@ -1983,8 +2152,11 @@ FUXWebviewResult FUXWebviewWebView2Provider::SendWin32Input(const FUXWebviewInpu
 		|| Event.Type == EUXWebviewInputType::Char;
 	HWND PreviousFocus = bNeedsFocus ? AcquireInputFocus() : nullptr;
 
-	const int32 X = FMath::RoundToInt(Event.Position.X * State->DpiScale);
-	const int32 Y = FMath::RoundToInt(Event.Position.Y * State->DpiScale);
+	// Overlay hosts scale by their own DPI; texture hosts scale by the viewport
+	// scale reported through SetViewport.
+	const float Scale = State->bOverlayMode ? State->OverlayDpiScale : State->DpiScale;
+	const int32 X = FMath::RoundToInt(Event.Position.X * Scale);
+	const int32 Y = FMath::RoundToInt(Event.Position.Y * Scale);
 	const WPARAM Modifiers = MouseModifiers(Event);
 
 	// The browser windows belong to the game thread, so a synchronous delivery

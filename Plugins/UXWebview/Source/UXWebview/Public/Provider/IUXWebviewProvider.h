@@ -87,6 +87,22 @@ public:
 	virtual FUXWebviewResult SendInput(const FUXWebviewInputEvent& Event) = 0;
 	virtual FUXWebviewResult SetFocus(bool bFocused) = 0;
 
+	/**
+	 * Overlay only: hosts the page with a composition controller (transparent
+	 * page, page cursors, no typed input) or with a regular controller (opaque,
+	 * native keyboard and IME). Providers recreate their controller, so page
+	 * state is not carried across a switch. Other providers reject this.
+	 */
+	virtual FUXWebviewResult SetCompositionOverlay(bool bComposition)
+	{
+		(void)bComposition;
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotSupported,
+			TEXT("composition hosting is not supported by this provider"));
+	}
+
+	/** True while this view is hosted with a composition controller. */
+	virtual bool IsCompositionOverlay() const { return false; }
+
 	/** Drives external begin frame providers; a no-op elsewhere. */
 	virtual FUXWebviewResult RequestFrame() = 0;
 

@@ -531,6 +531,34 @@ void FpsProbeCommand(const TArray<FString>& Args, UWorld* World)
 }
 
 /**
+ * Rehosts the running overlay on the other WebView2 controller type. The page
+ * reloads, so the widget keeps its bounds and URL but loses page state.
+ */
+void CompositionCommand(const TArray<FString>& Args, UWorld* World)
+{
+	(void)World;
+	const bool bComposition = Args.Num() > 0 ? FCString::Atoi(*Args[0]) != 0 : true;
+	const float Delay = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 2.0f;
+
+	ScheduleViewAction(Delay, FString::Printf(TEXT("composition %d"), bComposition ? 1 : 0),
+		[bComposition](UUXWebview* View)
+		{
+			const FUXWebviewResult Result = View->SetCompositionOverlay(bComposition);
+			const FString Message = FString::Printf(TEXT("composition overlay %s: ok=%d '%s'"),
+				bComposition ? TEXT("on") : TEXT("off"), Result.bSuccess ? 1 : 0,
+				*Result.Message);
+			if (Result.bSuccess)
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Log, TEXT("%s"), *Message);
+			}
+			else
+			{
+				UE_LOG(LogUXWebviewWidgetDemo, Warning, TEXT("%s"), *Message);
+			}
+		});
+}
+
+/**
  * Captures the game viewport after a delay. Texture mode draws the web frame
  * into the viewport, so a HighResShot is the headless way to inspect the
  * pixels that are actually presented.
@@ -710,6 +738,11 @@ FAutoConsoleCommandWithWorldAndArgs GWidgetFpsProbeCommand(
 	TEXT("UXWebviewSample.WidgetFpsProbe"),
 	TEXT("UXWebviewSample.WidgetFpsProbe [delay] [seconds] - samples the page requestAnimationFrame rate and logs it"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&FpsProbeCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetCompositionCommand(
+	TEXT("UXWebviewSample.WidgetComposition"),
+	TEXT("UXWebviewSample.WidgetComposition [on] [delay] - rehosts the running overlay as a composition(1) or windowed(0) controller"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&CompositionCommand));
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetScreenshotCommand(
 	TEXT("UXWebviewSample.WidgetScreenshot"),

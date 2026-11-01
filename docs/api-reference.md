@@ -75,6 +75,8 @@ return `NotReady`.
 | `GetFrameSize()` | Pure | Physical pixels of the last frame |
 | `GetFrameCount()` | Pure | Frames received since the view became ready |
 | `IsOverlayMode()` | Pure | True when the provider composites through a native window |
+| `SetCompositionOverlay(bComposition)` | Callable | WebView2 overlay views only: moves the page to a composition controller (transparent, no typed input) or back. Reloads the current URL |
+| `IsCompositionOverlay()` | Pure | True while the overlay renders through a composition controller |
 | `LoadURL(Url)` | Callable | Absolute URL |
 | `LoadHTML(Html, BaseUrl)` | Callable | `BaseUrl` resolves relative links and bridge origin |
 | `Reload()` | Callable | |
@@ -119,7 +121,7 @@ rejected promise reports `bSuccess = false` with the rejection message.
 | `bGpuSharedTexture` | Frames arrive as GPU shared textures without a CPU copy |
 | `bCpuPixelBuffer` | Frames are uploaded from CPU pixels |
 | `bOverlayMode` | Provider can composite through a native child window |
-| `bTransparency` | Page background can be transparent; WebView2 reports it only when `bCompositionOverlay` is enabled |
+| `bTransparency` | Page background can be transparent; WebView2 reports it while a composition controller hosts the view, so the flag follows `SetCompositionOverlay` |
 | `bExternalBeginFrame` | The plugin paces page frames explicitly |
 | `bDevTools` | `OpenDevTools` is available |
 | `bOfflineCache` | Provider keeps a persistent page cache |
@@ -184,11 +186,15 @@ Dragging needs intermediate `MouseMove` events between `MouseDown` and
 WebView2 composition overlay views accept mouse events only: `KeyDown`, `KeyUp`,
 `Char` and IME events fail with `NotSupported`, and `bTransparency` is the flag
 that tells game code whether the provider can show a transparent page background.
+Call `SetCompositionOverlay(false)` when the page needs typed text; the view
+reloads and gains the regular controller's keyboard and IME path.
 
-Overlay views of either provider (CEF or WebView2) are driven by their native
-browser window, so `SendInput` returns success without forwarding the event; the
-window system delivers real input there. Synthetic events reach the page in
-texture mode and in WebView2 composition overlay views.
+Every provider forwards `SendInput`, overlay views included. In a native overlay
+the browser window consumes real input straight from the OS, and a `SendInput`
+call travels a separate path (window messages for WebView2, IPC for CEF), so one
+physical event never reaches the page twice. Overlay views of both providers
+therefore accept synthetic mouse and key events, and CEF overlays also accept
+IME events.
 
 ## Script bridge
 

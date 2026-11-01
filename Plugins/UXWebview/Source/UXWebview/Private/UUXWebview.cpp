@@ -203,6 +203,29 @@ bool UUXWebview::IsOverlayMode() const
 	return Provider.IsValid() && Provider->IsOverlayMode();
 }
 
+FUXWebviewResult UUXWebview::SetCompositionOverlay(bool bComposition)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		return Ready;
+	}
+
+	const FUXWebviewResult Result = Provider->SetCompositionOverlay(bComposition);
+	if (Result.bSuccess)
+	{
+		// Composition hosting is the only source of transparent overlays, and the
+		// provider reports the live mode, so the cached capabilities follow it.
+		Capabilities = Provider->GetCapabilities();
+	}
+	return Result;
+}
+
+bool UUXWebview::IsCompositionOverlay() const
+{
+	return Provider.IsValid() && Provider->IsCompositionOverlay();
+}
+
 FUXWebviewResult UUXWebview::SetVisible(bool bVisible)
 {
 	const FUXWebviewResult Alive = GuardAlive();

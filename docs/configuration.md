@@ -19,7 +19,7 @@ bCompositionOverlay=True
 | `bAllowProviderFallback` | `true` | When false, an unavailable explicitly requested provider fails instead of falling back |
 | `BridgeAllowedOrigins` | `[]` | Origins allowed to call game functions from the page; empty denies every origin |
 | `bDirectDisplay` | `true` | CEF texture mode binds the shared frame directly; disable to copy into a pool texture. WebView2 always uploads CPU pixels and ignores this |
-| `bCompositionOverlay` | `false` | WebView2 overlay views use `ICoreWebView2CompositionController` and DirectComposition: transparent page backgrounds and page cursors work, but the view has no keyboard or IME path. Texture mode and CEF are unaffected |
+| `bCompositionOverlay` | `false` | WebView2 overlay views start on `ICoreWebView2CompositionController` and DirectComposition: transparent page backgrounds and page cursors work, but the view has no keyboard or IME path. `SetCompositionOverlay` switches a running view at runtime. Texture mode and CEF are unaffected |
 | `bEnableDevTools` | `false` | Enables `OpenDevTools`; CEF also starts a DevTools HTTP endpoint |
 | `DevToolsPort` | `9222` | CEF DevTools port; `http://127.0.0.1:9222/json/version` answers when enabled |
 | `IdleShutdownSeconds` | `30` | CEF host exits after this many idle seconds with no live views. In-process WebView2 has no host process to reap |
@@ -70,6 +70,8 @@ With `bCompositionOverlay` enabled, WebView2 overlay views swap the browser chil
 window for a DirectComposition visual. That allows transparent page backgrounds
 (`bTransparent`) and page cursors, but the view cannot receive typed text: the
 WebView2 SDK offers no key or IME injection for composition controllers. Leave
-the setting off when the page needs a keyboard.
+the setting off when the page needs a keyboard, or call
+`SetCompositionOverlay(false)` before the page asks for text input; the view
+reloads with the regular controller and `bTransparency` drops to false.
 
 Overlay and texture views can coexist in one process.

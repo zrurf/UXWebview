@@ -74,6 +74,7 @@ The sample project exposes console commands; any of them can be driven with
 | `UXWebviewSample.WidgetReload` | `[delay]` |
 | `UXWebviewSample.WidgetLoadHtml` | `[delay] [file]`; loads the file through `LoadHTML` |
 | `UXWebviewSample.WidgetBridge` | Makes the page call `window.uxwv.call` and logs the reply |
+| `UXWebviewSample.WidgetComposition` | Switches a WebView2 overlay between composition hosting and a windowed controller; `[on] [delay]` |
 | `UXWebviewSample.WidgetFpsProbe` | Samples the page `requestAnimationFrame` rate |
 | `UXWebviewSample.WidgetScreenshot` | Requests a `HighResShot` of the game viewport |
 | `UXWebviewSample.WidgetEmit` | Sends a game event to the page; `[delay] [event] [payloadJson]` |

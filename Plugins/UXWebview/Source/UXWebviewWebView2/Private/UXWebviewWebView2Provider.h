@@ -55,6 +55,8 @@ public:
 	virtual FUXWebviewResult SetOverlayBounds(const FIntPoint& Position,
 		const FIntPoint& Size, float InDpiScale) override;
 	virtual bool IsOverlayMode() const override;
+	virtual FUXWebviewResult SetCompositionOverlay(bool bComposition) override;
+	virtual bool IsCompositionOverlay() const override;
 	virtual FUXWebviewResult SetVisible(bool bInVisible) override;
 	virtual FUXWebviewResult SetFrameRate(int32 FramesPerSecond) override;
 	virtual FUXWebviewResult SetZoom(float ZoomFactor) override;
@@ -81,6 +83,11 @@ private:
 
 	void CreateHostWindow(bool bOverlay, uint64 ParentHandle);
 	void DestroyHostWindow();
+	/**
+	 * Swaps the host window procedure when the composition controller uses it.
+	 * Restoring the saved pair also lets a regular controller take input again.
+	 */
+	void ApplyCompositionHosting(bool bComposition);
 	void ApplyGeometry();
 	void ApplyVisibility();
 
@@ -97,6 +104,13 @@ private:
 	 * Returns immediately; the result reports whether the chain could be started.
 	 */
 	FUXWebviewResult StartEnvironment();
+	/**
+	 * Requests the controller that hosts the page on the existing environment
+	 * and host window. Returns false before issuing any asynchronous request when
+	 * the mode is impossible (no environment3, no host window), so callers can
+	 * fall back instead of waiting for a controller that never arrives.
+	 */
+	bool CreateController(bool bComposition);
 	void ConfigureWebView();
 	/**
 	 * Applies geometry, visibility and the initial navigation. Runs after the

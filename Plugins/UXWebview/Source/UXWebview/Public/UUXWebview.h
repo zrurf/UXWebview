@@ -84,6 +84,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "UXWebview")
 	bool IsOverlayMode() const;
 
+	/**
+	 * Overlay only: moves the page between composition hosting (transparent,
+	 * page cursors, no typed input) and a regular controller (opaque, native
+	 * keyboard and IME). The provider recreates its controller and reloads the
+	 * current URL, so page state and scroll position are lost.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
+	FUXWebviewResult SetCompositionOverlay(bool bComposition);
+
+	/** True while the page renders through a composition controller. */
+	UFUNCTION(BlueprintPure, Category = "UXWebview")
+	bool IsCompositionOverlay() const;
+
 	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetVisible(bool bVisible);
 
@@ -118,8 +131,9 @@ public:
 	bool RespondToScriptMessage(int32 RequestId, bool bSuccess, const FString& ResultJson);
 
 	/** Routes one mouse, key or IME event; coordinates are view CSS pixels.
-	 *  Overlay views are driven by their native browser window, so the call
-	 *  succeeds without forwarding anything there. */
+	 *  Overlay views forward as well: the native browser window owns real input,
+	 *  so a synthetic event here never duplicates a physical one. Composition
+	 *  overlay views accept mouse events only. */
 	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SendInput(const FUXWebviewInputEvent& Event);
 
