@@ -11,11 +11,11 @@ and stored in `Config/DefaultGame.ini`.
 | `FallbackProviders` | `[]` | Ordered candidates tried when the requested provider is unavailable |
 | `bAllowProviderFallback` | `true` | When false, an unavailable explicitly requested provider fails instead of falling back |
 | `BridgeAllowedOrigins` | `[]` | Origins allowed to call game functions from the page; empty denies every origin |
-| `bDirectDisplay` | `true` | Texture mode shows the shared frame texture directly; disable to copy into a pool texture |
-| `bEnableDevTools` | `false` | Starts the host with a DevTools HTTP endpoint |
-| `DevToolsPort` | `9222` | DevTools port; `http://127.0.0.1:9222/json/version` answers when enabled |
-| `IdleShutdownSeconds` | `30` | Host exits after this many idle seconds with no live views |
-| `bAutoRecoverOnCrash` | `true` | Restarts the host and recreates views after a host crash |
+| `bDirectDisplay` | `true` | CEF texture mode binds the shared frame directly; disable to copy into a pool texture. WebView2 always uploads CPU pixels and ignores this |
+| `bEnableDevTools` | `false` | Enables `OpenDevTools`; CEF also starts a DevTools HTTP endpoint |
+| `DevToolsPort` | `9222` | CEF DevTools port; `http://127.0.0.1:9222/json/version` answers when enabled |
+| `IdleShutdownSeconds` | `30` | CEF host exits after this many idle seconds with no live views. In-process WebView2 has no host process to reap |
+| `bAutoRecoverOnCrash` | `true` | Restarts the CEF host or reloads the WebView2 page after a renderer failure |
 
 ## Per-view parameters
 
@@ -35,8 +35,13 @@ and stored in `Config/DefaultGame.ini`.
 | Name | Availability | Notes |
 | --- | --- | --- |
 | `Null` | Always | Animated texture, no browser; useful for layout work and tests |
-| `CEF` | Windows with a built host | Shared-texture frames or native overlay |
-| `WebView2` | Not implemented | Module is a stub |
+| `CEF` | Windows with a built host | Shared-texture frames or native overlay; primary backend |
+| `WebView2` | Windows with the SDK at build time and the Edge WebView2 Runtime installed | In-process Edge; CPU-captured texture up to 30 fps or native overlay |
+
+Provider resolution order is: an explicit `ProviderName`, then
+`PlatformDefaultProvider`, then the built-in default (`CEF`), then
+`FallbackProviders` when `bAllowProviderFallback` is enabled. A provider that
+resolves but is unavailable fails with its `UnavailableReason`.
 
 `UUXWebviewSubsystem::GetProviders()` returns every registered provider with its
 capabilities and an availability reason, which is the same data that
@@ -44,10 +49,13 @@ capabilities and an availability reason, which is the same data that
 
 ## Display modes
 
-- **Texture** renders the page off-screen and publishes a shared texture; the
-  widget draws it. Frames are paced by the game tick and the target frame rate.
-- **Overlay** creates a native Chromium child window inside the game window. No
+- **Texture** renders the page off-screen and publishes a texture that the
+  widget draws. CEF shares a GPU texture; WebView2 captures PNG frames and
+  uploads CPU pixels, so its frame rate is capped at 30. Frames are paced by the
+  game tick and the target frame rate.
+- **Overlay** creates a native browser child window inside the game window. No
   frame copies occur and the page runs on its own compositor; input, IME and
-  clipping follow the native window rules.
+  clipping follow the native window rules. Overlay also runs the full frame rate
+  for WebView2.
 
-Overlay and texture views can coexist in one host session.
+Overlay and texture views can coexist in one process.

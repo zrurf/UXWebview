@@ -19,6 +19,12 @@ The staging source is `Plugins/UXWebview/Binaries/ThirdParty/UXWebviewHost/Win64
 which `Scripts/BuildHost.ps1` fills; if that folder is absent the module falls
 back to `native/build/Release`.
 
+The WebView2 backend stages only `WebView2Loader.dll` next to the game binary.
+The browser itself is the machine-wide Microsoft Edge WebView2 Runtime and is
+never copied into the archive; target machines need it installed (Windows 10/11
+usually has it already). A build without the WebView2 SDK simply omits the
+provider.
+
 ## Command
 
 ```
@@ -62,4 +68,5 @@ root. Pointing at the root makes UAT remap the sample project itself into
 
 Run the packaged executable with `-ExecCmds="UXWebview.DumpState"` and check the
 log for the provider list and a live view line; then open a page and confirm
-frames arrive.
+frames arrive. The provider line reports `WebView2 ... available=1` when the
+runtime is present and the loader was staged.

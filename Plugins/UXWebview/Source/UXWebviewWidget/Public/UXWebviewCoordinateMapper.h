@@ -4,7 +4,8 @@
 
 /**
  * Converts Slate local (DIP) positions into web CSS pixels.
- * Formula: Web = Local / WidgetSize * ViewportSize / DpiScale (see 07-输入与IME).
+ * Formula: Web = Local / WidgetSize * ViewportSize / DpiScale.
+ * ViewportSize is physical pixels, so dividing by DpiScale leaves CSS pixels.
  * Keeping it in one place avoids per-event copies of the math.
  */
 struct FUXWebviewCoordinateMapper

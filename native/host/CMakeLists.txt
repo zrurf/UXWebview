@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(UXWebviewHost VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
-	message(FATAL_ERROR "UXWebviewHost builds on Windows only until the macOS/Linux milestones")
+	message(FATAL_ERROR "UXWebviewHost builds on Windows only; the host uses Win32 APIs directly")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)

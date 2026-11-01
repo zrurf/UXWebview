@@ -18,8 +18,9 @@ inline const char* ExecQueryFunction()
 // Injected into every main frame after the message router installed its query
 // function. Pages talk to the game through this object:
 //   window.uxwv.call('name', args)  -> Promise resolved with the game's reply
-//   window.uxwv.emit('name', data)  -> Promise resolved when the game got it
-// Both send {name, payload}; the browser side forwards them to the plugin.
+//   window.uxwv.emit('name', data)  -> Promise resolved with the game's reply (notification)
+// Both send {name, payload}; the browser side forwards them to the plugin, and
+// the game answers both through the same RespondToScriptMessage path.
 inline const std::string& BridgeBootstrapScript()
 {
 	static const std::string Script = R"JS(

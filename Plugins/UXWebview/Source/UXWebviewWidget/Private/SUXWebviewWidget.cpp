@@ -201,7 +201,7 @@ int32 SUXWebviewWidget::OnPaint(
 
 FCursorReply SUXWebviewWidget::OnCursorQuery(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent) const
 {
-	// CEF sends cursor updates in M5; until then the arrow is the safe default.
+	// Providers do not report page cursors yet, so the arrow stays the safe default.
 	return bInteractable ? FCursorReply::Cursor(EMouseCursor::Default) : FCursorReply::Unhandled();
 }
 

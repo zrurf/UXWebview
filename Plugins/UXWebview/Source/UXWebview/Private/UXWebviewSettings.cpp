@@ -2,7 +2,8 @@
 
 UUXWebviewSettings::UUXWebviewSettings()
 {
-	// Windows tries CEF first and falls back to WebView2; other platforms only CEF.
+	// Same fallback order everywhere; providers that are not registered for the
+	// current platform are skipped by the resolver.
 	FallbackProviders.Add(TEXT("CEF"));
 	FallbackProviders.Add(TEXT("WebView2"));
 }

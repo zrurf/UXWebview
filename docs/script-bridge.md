@@ -11,13 +11,16 @@ window.uxwv.call('getPlayerState', { id: 42 }).then(function (reply) {
   console.log(reply.level);
 });
 
-// Fire-and-forget: resolves once the game received the event.
+// Notification: still answered by the game, so the page can confirm delivery.
 window.uxwv.emit('opened', { tab: 'inventory' });
 ```
 
-Both functions return a Promise. Payloads must survive `JSON.stringify`; the
-reply is parsed with `JSON.parse` and falls back to the raw string. A missing
-reply resolves with `null`.
+Both functions cross the bridge identically and both need a
+`RespondToScriptMessage` call. `emit` is meant for notifications and `call` for
+requests, but neither is fire-and-forget: an unanswered call rejects after 30
+seconds. Payloads must survive `JSON.stringify`; the reply text is parsed with
+`JSON.parse` and falls back to the raw string. A successful reply with an empty
+payload resolves with `null`.
 
 ## Game side
 
@@ -41,7 +44,8 @@ void UMyWidget::HandleScriptMessage(const FString& Name, const FString& PayloadJ
 ```
 
 - `RespondToScriptMessage` must be called exactly once per request.
-- A query left unanswered fails with `timeout` after 30 seconds.
+- A request left unanswered fails with `timeout` after 30 seconds.
+- Both CEF and WebView2 use the same message shape and origin policy.
 - Game → page: `EmitToWeb(Name, PayloadJson)` dispatches a `uxwv` CustomEvent
   whose `detail` is `{ name, payload }`.
 
