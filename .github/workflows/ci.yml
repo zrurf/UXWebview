@@ -18,6 +18,34 @@ jobs:
               json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
               print(path, 'ok')
           "
+      - name: Every declared module must have a Build.cs
+        run: |
+          python3 -c "
+          import json, pathlib, sys
+          plugin = json.loads(pathlib.Path('Plugins/UXWebview/UXWebview.uplugin').read_text(encoding='utf-8'))
+          root = pathlib.Path('Plugins/UXWebview/Source')
+          missing = [m['Name'] for m in plugin['Modules'] if not (root / m['Name'] / (m['Name'] + '.Build.cs')).exists()]
+          if missing:
+              print('missing Build.cs for:', ', '.join(missing)); sys.exit(1)
+          print(len(plugin['Modules']), 'modules ok')
+          "
+
+  # Opt-in compile matrix. Requires self-hosted Windows runners labelled
+  # ue-5.0 / ue-5.4 / ue-5.8 that expose the engine path through UE_ROOT.
+  ue-compile:
+    if: ${{ vars.UXW_UE_MATRIX == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ue: [ '5.0', '5.4', '5.8' ]
+    runs-on: [ self-hosted, windows, '${{ matrix.ue }}' ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build editor target
+        shell: pwsh
+        run: |
+          & "$env:UE_ROOT/Engine/Build/BatchFiles/Build.bat" UXWebviewSampleEditor Win64 Development `
+            -Project="$PWD/Samples/UXWebviewSample/UXWebviewSample.uproject" -WaitMutex
 
   host-build:
     if: ${{ hashFiles('native/host/CMakeLists.txt') != '' }}

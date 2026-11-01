@@ -6,8 +6,20 @@ textures, so pages can be shown in UMG, as textures, or as a native overlay.
 
 ## Status
 
-Repository scaffold (M0). No functional API yet: modules load, but providers
-and the native host are not implemented.
+Windows is feature-complete: CEF off-screen rendering with shared-texture frames,
+native overlay windows, UMG widget with mouse/keyboard/IME/clipboard, script
+bridge with an origin allowlist, crash recovery and packaged builds. macOS and
+Linux accept the same provider interface but have no host yet; the WebView2
+provider is still a stub.
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [docs/getting-started.md](docs/getting-started.md) | Build steps, sample commands, troubleshooting |
+| [docs/configuration.md](docs/configuration.md) | Project settings, per-view parameters, display modes |
+| [docs/script-bridge.md](docs/script-bridge.md) | `window.uxwv` API, allowlist, failure modes |
+| [docs/packaging.md](docs/packaging.md) | Cook/stage/archive, host lookup, bundled CEF runtime |
 
 ## Requirements
 

@@ -123,18 +123,29 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	const FString Url = Args.Num() > 3 ? Args[3] : FString();
 	const int32 FrameRate = Args.Num() > 4 ? FCString::Atoi(*Args[4]) : 30;
 	// Optional size args let a perf pass use the same command for full-screen
-	// viewports; the defaults stay at the small demo panel.
-	const int32 Width = Args.Num() > 5 ? FMath::Max(FCString::Atoi(*Args[5]), 16) : 512;
-	const int32 Height = Args.Num() > 6 ? FMath::Max(FCString::Atoi(*Args[6]), 16) : 288;
+	// viewports; the defaults stay at the small demo panel. Zero selects fill
+	// mode, where the panel inherits the viewport size and Slate drives the DPI.
+	const int32 Width = Args.Num() > 5 ? FMath::Max(FCString::Atoi(*Args[5]), 0) : 512;
+	const int32 Height = Args.Num() > 6 ? FMath::Max(FCString::Atoi(*Args[6]), 0) : 288;
+	const bool bFill = Width <= 0 || Height <= 0;
 	// Non-zero switches the view to a native overlay child window (no texture copy).
 	const bool bOverlay = Args.Num() > 7 && FCString::Atoi(*Args[7]) != 0;
+	// Non-zero anchors the panel to the top-left corner, which is what a HUD wants.
+	const bool bTopLeft = Args.Num() > 8 && FCString::Atoi(*Args[8]) != 0;
 	const float BoxScale = Dpi > 0.0f ? Dpi : 1.0f;
 
 	FUXWebviewCreateParams Params;
 	Params.ProviderName = Provider;
-	Params.ViewportSize = FIntPoint(
-		FMath::RoundToInt(Width * BoxScale),
-		FMath::RoundToInt(Height * BoxScale));
+	// Fill mode has no layout size yet, so seed the browser from the physical
+	// viewport; the widget corrects the viewport once it has been laid out.
+	FIntPoint SeedSize(1920, 1080);
+	if (bFill && ViewportClient->Viewport)
+	{
+		SeedSize = ViewportClient->Viewport->GetSizeXY();
+	}
+	Params.ViewportSize = bFill
+		? SeedSize
+		: FIntPoint(FMath::RoundToInt(Width * BoxScale), FMath::RoundToInt(Height * BoxScale));
 	Params.DpiScale = Dpi;
 	Params.TargetFrameRate = FrameRate;
 	Params.InitialUrl = Url;
@@ -165,25 +176,29 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	GWidgetDemoWidget = Widget;
 
 	// The viewport overlay gives its content the full viewport size, so an outer
-	// box centers a size-constrained inner box instead of the leaf itself.
-	GWidgetDemoRoot = SNew(SBox)
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
-		[
-			SNew(SBox)
+	// box positions a size-constrained inner box instead of the leaf itself.
+	// Fill mode drops the inner constraint and lets the panel cover the viewport.
+	TSharedPtr<SWidget> Leaf = Widget->TakeWidget();
+	if (!bFill)
+	{
+		Leaf = SNew(SBox)
 			.WidthOverride(static_cast<float>(Width))
 			.HeightOverride(static_cast<float>(Height))
-			[
-				Widget->TakeWidget()
-			]
-		];
+			[Leaf.ToSharedRef()];
+	}
+	GWidgetDemoRoot = SNew(SBox)
+		.HAlign(bFill ? HAlign_Fill : (bTopLeft ? HAlign_Left : HAlign_Center))
+		.VAlign(bFill ? VAlign_Fill : (bTopLeft ? VAlign_Top : VAlign_Center))
+		.Padding(FMargin(bTopLeft && !bFill ? 24.0f : 0.0f))
+		[Leaf.ToSharedRef()];
 	ViewportClient->AddViewportWidgetContent(GWidgetDemoRoot.ToSharedRef(), 10);
 
 	const FString UrlDisplay = Url.IsEmpty() ? FString(TEXT("(default)")) : Url;
+	const FString SizeDisplay = bFill ? FString(TEXT("fill")) : FString::Printf(TEXT("%dx%d"), Width, Height);
 	UE_LOG(LogUXWebviewWidgetDemo, Log,
-		TEXT("widget demo started: provider=%s url=%s %dx%d dpi=%.2f (0=auto) viewport=%dx%d fps=%d mode=%s; click inside to send input"),
-		*Provider, *UrlDisplay,
-		Width, Height, Dpi, Params.ViewportSize.X, Params.ViewportSize.Y, FrameRate,
+		TEXT("widget demo started: provider=%s url=%s size=%s dpi=%.2f (0=auto) viewport=%dx%d fps=%d mode=%s; click inside to send input"),
+		*Provider, *UrlDisplay, *SizeDisplay, Dpi,
+		Params.ViewportSize.X, Params.ViewportSize.Y, FrameRate,
 		bOverlay ? TEXT("overlay") : TEXT("texture"));
 
 	if (Seconds > 0.0f)
@@ -206,6 +221,47 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 			return false;
 		}));
 	}
+}
+
+/** HUD preset: a small texture panel anchored to the top-left corner. */
+void HudSceneCommand(const TArray<FString>& Args, UWorld* World)
+{
+	const FString Url = Args.Num() > 0 ? Args[0] : FString();
+	const int32 Width = Args.Num() > 1 ? FMath::Max(FCString::Atoi(*Args[1]), 64) : 480;
+	const int32 Height = Args.Num() > 2 ? FMath::Max(FCString::Atoi(*Args[2]), 64) : 270;
+
+	TArray<FString> DemoArgs;
+	DemoArgs.Add(TEXT("0"));
+	DemoArgs.Add(TEXT("0"));
+	DemoArgs.Add(TEXT("CEF"));
+	DemoArgs.Add(Url);
+	DemoArgs.Add(TEXT("30"));
+	DemoArgs.Add(FString::FromInt(Width));
+	DemoArgs.Add(FString::FromInt(Height));
+	DemoArgs.Add(TEXT("0"));
+	DemoArgs.Add(TEXT("1"));
+	StartWidgetDemo(DemoArgs, World);
+}
+
+/** Fullscreen preset: an overlay view covering the whole game viewport. */
+void FullscreenSceneCommand(const TArray<FString>& Args, UWorld* World)
+{
+	const FString Url = Args.Num() > 0 ? Args[0] : FString();
+	const int32 FrameRate = Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 60;
+
+	// Fill mode: the panel takes the viewport size, so Slate applies its own
+	// layout scale and the overlay ends up covering the whole game window.
+	TArray<FString> DemoArgs;
+	DemoArgs.Add(TEXT("0"));
+	DemoArgs.Add(TEXT("0"));
+	DemoArgs.Add(TEXT("CEF"));
+	DemoArgs.Add(Url);
+	DemoArgs.Add(FString::FromInt(FrameRate));
+	DemoArgs.Add(TEXT("0"));
+	DemoArgs.Add(TEXT("0"));
+	DemoArgs.Add(TEXT("1"));
+	DemoArgs.Add(TEXT("0"));
+	StartWidgetDemo(DemoArgs, World);
 }
 
 void StopWidgetDemoCommand(const TArray<FString>& Args, UWorld* World)
@@ -597,8 +653,18 @@ void SecondViewCommand(const TArray<FString>& Args, UWorld* World)
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetDemoCommand(
 	TEXT("UXWebviewSample.WidgetDemo"),
-	TEXT("UXWebviewSample.WidgetDemo [dpi] [seconds] [provider] [url] [fps] [width] [height] [overlay] - hosts the UMG webview widget in the viewport"),
+	TEXT("UXWebviewSample.WidgetDemo [dpi] [seconds] [provider] [url] [fps] [width] [height] [overlay] [topLeft] - hosts the UMG webview widget in the viewport; width/height 0 fills the viewport"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&StartWidgetDemo));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetHudCommand(
+	TEXT("UXWebviewSample.Hud"),
+	TEXT("UXWebviewSample.Hud [url] [width] [height] - HUD scene preset: top-left texture panel"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HudSceneCommand));
+
+FAutoConsoleCommandWithWorldAndArgs GWidgetFullscreenCommand(
+	TEXT("UXWebviewSample.Fullscreen"),
+	TEXT("UXWebviewSample.Fullscreen [url] [fps] - fullscreen scene preset: viewport-sized overlay"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&FullscreenSceneCommand));
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetProbeCommand(
 	TEXT("UXWebviewSample.WidgetProbe"),

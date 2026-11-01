@@ -39,6 +39,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "UXWebview")
 	UTexture2D* GetTexture() const;
 
+	/** Physical size of the last received frame; zero before the first frame. */
+	UFUNCTION(BlueprintPure, Category = "UXWebview")
+	FIntPoint GetFrameSize() const { return FIntPoint(FrameWidth, FrameHeight); }
+
+	/** Number of frames received since the view became ready. */
+	UFUNCTION(BlueprintPure, Category = "UXWebview")
+	int32 GetFrameCount() const { return static_cast<int32>(FrameCount); }
+
 	FUXWebviewResult LoadURL(const FString& Url);
 	FUXWebviewResult LoadHTML(const FString& Html, const FString& BaseUrl);
 	FUXWebviewResult Reload();

@@ -6,6 +6,7 @@
 #include "InputCoreTypes.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/SlateBrush.h"
+#include "Widgets/SWindow.h"
 #include "UUXWebview.h"
 #include "UXWebviewCoordinateMapper.h"
 #include "UXWebviewTextInputContext.h"
@@ -86,12 +87,22 @@ void SUXWebviewWidget::Tick(const FGeometry& AllottedGeometry, const double InCu
 
 void SUXWebviewWidget::UpdateOverlayBounds(const FGeometry& AllottedGeometry, UUXWebview& View)
 {
-	// Render space is window client pixels, so absolute geometry can go straight
-	// to the host without any DPI conversion.
+	// Absolute geometry is in screen pixels, so strip the window's client origin
+	// before handing the panel rectangle to the host: it places its native
+	// window relative to the client area. Without this step a windowed game
+	// offsets the overlay by the window's desktop position.
+	FVector2f ClientOrigin = FVector2f::ZeroVector;
+	if (TSharedPtr<SWindow> Window = FSlateApplication::Get().FindWidgetWindow(SharedThis(this)))
+	{
+		const FSlateRect ClientRect = Window->GetClientRectInScreen();
+		ClientOrigin = FVector2f(ClientRect.Left, ClientRect.Top);
+	}
+
 	const FVector2f AbsolutePosition = AllottedGeometry.GetAbsolutePosition();
 	const FVector2f AbsoluteSize = AllottedGeometry.GetAbsoluteSize();
 	const FIntPoint PixelPosition = FIntPoint(
-		FMath::RoundToInt(AbsolutePosition.X), FMath::RoundToInt(AbsolutePosition.Y));
+		FMath::RoundToInt(AbsolutePosition.X - ClientOrigin.X),
+		FMath::RoundToInt(AbsolutePosition.Y - ClientOrigin.Y));
 	const FIntPoint PixelSize = FIntPoint(
 		FMath::Max(1, FMath::RoundToInt(AbsoluteSize.X)),
 		FMath::Max(1, FMath::RoundToInt(AbsoluteSize.Y)));

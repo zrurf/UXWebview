@@ -17,7 +17,8 @@ public class UXWebviewEditor : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"Slate"
+			"Slate",
+			"Settings"
 		});
 	}
 }
