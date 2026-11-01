@@ -10,7 +10,7 @@
 class UUXWebview;
 
 /** Owns every webview of a game instance and bridges to the provider registry. */
-UCLASS()
+UCLASS(BlueprintType)
 class UXWEBVIEW_API UUXWebviewSubsystem : public UGameInstanceSubsystem
 {
 	GENERATED_BODY()

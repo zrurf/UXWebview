@@ -238,6 +238,33 @@ FUXWebviewResult UUXWebview::ExecuteScript(const FString& Script, FUXWebviewScri
 	return Ready.bSuccess ? Provider->ExecuteScript(Script, MoveTemp(OnResult)) : Ready;
 }
 
+int32 UUXWebview::ExecuteScriptAsync(const FString& Script)
+{
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		OnScriptResult.Broadcast(0, false, Ready.Message);
+		return 0;
+	}
+
+	const int32 RequestId = NextScriptRequestId++;
+	TWeakObjectPtr<UUXWebview> WeakThis(this);
+	const FUXWebviewResult Result = Provider->ExecuteScript(Script,
+		[WeakThis, RequestId](bool bSuccess, const FString& ResultJson)
+		{
+			if (UUXWebview* View = WeakThis.Get())
+			{
+				View->OnScriptResult.Broadcast(RequestId, bSuccess, ResultJson);
+			}
+		});
+	if (!Result.bSuccess)
+	{
+		OnScriptResult.Broadcast(0, false, Result.Message);
+		return 0;
+	}
+	return RequestId;
+}
+
 FUXWebviewResult UUXWebview::EmitToWeb(const FString& EventName, const FString& PayloadJson)
 {
 	const FUXWebviewResult Ready = GuardReady();

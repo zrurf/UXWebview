@@ -15,10 +15,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUXWebviewUrlDelegate, const FString
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUXWebviewCrashDelegate, const FString&, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FUXWebviewScriptMessageDelegate,
 	const FString&, Name, const FString&, PayloadJson, int32, RequestId);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FUXWebviewScriptResultDelegate,
+	int32, RequestId, bool, bSuccess, const FString&, ResultJson);
 
 /**
  * One web content instance. Owned by UUXWebviewSubsystem and must only be used
  * on the game thread. Every call returns a result instead of throwing.
+ *
+ * Blueprint usage: create with UUXWebviewSubsystem::CreateWebview, bind the
+ * delegates below, then drive the view with the BlueprintCallable functions.
+ * Long-running script replies arrive on OnScriptResult.
  */
 UCLASS(BlueprintType)
 class UXWEBVIEW_API UUXWebview : public UObject, public IUXWebviewViewClient
@@ -47,23 +53,61 @@ public:
 	UFUNCTION(BlueprintPure, Category = "UXWebview")
 	int32 GetFrameCount() const { return static_cast<int32>(FrameCount); }
 
+	/** Fixed provider capabilities, so gameplay code can branch on degradation. */
+	UFUNCTION(BlueprintPure, Category = "UXWebview")
+	FUXWebviewCapabilities GetCapabilities() const { return Capabilities; }
+
+	/** Navigates to an absolute URL; requires a ready view. */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult LoadURL(const FString& Url);
+
+	/** Loads HTML text. BaseUrl resolves relative links and the bridge origin. */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult LoadHTML(const FString& Html, const FString& BaseUrl);
+
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult Reload();
+
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult StopLoading();
 
+	/** Resizes the page in physical pixels; a zero DPI scale keeps the current one. */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetViewport(const FIntPoint& Size, float DpiScale);
+
 	/** Overlay only: absolute widget rect in parent client pixels, updated per tick. */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetOverlayBounds(const FIntPoint& Position, const FIntPoint& Size,
 		float DpiScale);
+
 	/** True when this view composites through a native child window. */
+	UFUNCTION(BlueprintPure, Category = "UXWebview")
 	bool IsOverlayMode() const;
+
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetVisible(bool bVisible);
+
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetFrameRate(int32 FramesPerSecond);
+
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetZoom(float ZoomFactor);
+
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetUserAgent(const FString& UserAgent);
 
 	FUXWebviewResult ExecuteScript(const FString& Script, FUXWebviewScriptCallback OnResult);
+
+	/**
+	 * Blueprint-friendly script call. Returns a request id for matching
+	 * OnScriptResult, or 0 when the view cannot run scripts; the delegate still
+	 * receives the failure with request id 0.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
+	int32 ExecuteScriptAsync(const FString& Script);
+
+	/** Dispatches a uxwv CustomEvent to the page. */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult EmitToWeb(const FString& EventName, const FString& PayloadJson);
 
 	/**
@@ -73,9 +117,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	bool RespondToScriptMessage(int32 RequestId, bool bSuccess, const FString& ResultJson);
 
+	/** Routes one mouse, key or IME event; coordinates are view CSS pixels. */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SendInput(const FUXWebviewInputEvent& Event);
+
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetFocus(bool bFocused);
+
 	FUXWebviewResult RequestFrame();
+
+	/** Opens provider devtools; fails with NotSupported when unavailable. */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult OpenDevTools();
 
 	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
@@ -90,6 +142,10 @@ public:
 	/** A page called window.uxwv.call/emit; answer with RespondToScriptMessage. */
 	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
 	FUXWebviewScriptMessageDelegate OnScriptMessage;
+
+	/** Reply for a script started with ExecuteScriptAsync, matched by RequestId. */
+	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
+	FUXWebviewScriptResultDelegate OnScriptResult;
 
 	// IUXWebviewViewClient
 	virtual void OnViewReady() override;
@@ -130,4 +186,7 @@ private:
 	int32 FrameWidth = 0;
 	int32 FrameHeight = 0;
 	uint64 FrameCount = 0;
+
+	/** Request ids issued by ExecuteScriptAsync; zero is reserved for failures. */
+	int32 NextScriptRequestId = 1;
 };

@@ -203,6 +203,7 @@ FUXWebviewCapabilities FUXWebviewCEFProvider::GetCapabilities() const
 {
 	FUXWebviewCapabilities Capabilities;
 	Capabilities.bGpuSharedTexture = true;
+	Capabilities.bOverlayMode = true;
 	Capabilities.bExternalBeginFrame = true;
 	Capabilities.bOfflineCache = true;
 	Capabilities.bDevTools = UUXWebviewSettings::Get().bEnableDevTools;
