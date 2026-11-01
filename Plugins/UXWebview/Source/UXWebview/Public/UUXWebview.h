@@ -87,8 +87,9 @@ public:
 	/**
 	 * Overlay only: moves the page between composition hosting (transparent,
 	 * page cursors, no typed input) and a regular controller (opaque, native
-	 * keyboard and IME). The provider recreates its controller and reloads the
-	 * current URL, so page state and scroll position are lost.
+	 * keyboard and IME). The provider captures scroll position and form values,
+	 * recreates its controller and reloads the current URL; the new controller
+	 * lands on the next tick, so query IsCompositionOverlay afterwards.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetCompositionOverlay(bool bComposition);

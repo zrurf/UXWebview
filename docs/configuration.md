@@ -72,6 +72,7 @@ window for a DirectComposition visual. That allows transparent page backgrounds
 WebView2 SDK offers no key or IME injection for composition controllers. Leave
 the setting off when the page needs a keyboard, or call
 `SetCompositionOverlay(false)` before the page asks for text input; the view
-reloads with the regular controller and `bTransparency` drops to false.
+reloads with the regular controller, carrying over the scroll position and form
+values, and `bTransparency` drops to false.
 
 Overlay and texture views can coexist in one process.

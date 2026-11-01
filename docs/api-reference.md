@@ -75,7 +75,7 @@ return `NotReady`.
 | `GetFrameSize()` | Pure | Physical pixels of the last frame |
 | `GetFrameCount()` | Pure | Frames received since the view became ready |
 | `IsOverlayMode()` | Pure | True when the provider composites through a native window |
-| `SetCompositionOverlay(bComposition)` | Callable | WebView2 overlay views only: moves the page to a composition controller (transparent, no typed input) or back. Reloads the current URL |
+| `SetCompositionOverlay(bComposition)` | Callable | WebView2 overlay views only: moves the page to a composition controller (transparent, no typed input) or back. Captures scroll position, form values and the caret before the reload and reapplies them; the swap completes on the next tick |
 | `IsCompositionOverlay()` | Pure | True while the overlay renders through a composition controller |
 | `LoadURL(Url)` | Callable | Absolute URL |
 | `LoadHTML(Html, BaseUrl)` | Callable | `BaseUrl` resolves relative links and bridge origin |

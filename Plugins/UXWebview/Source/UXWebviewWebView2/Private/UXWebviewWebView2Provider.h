@@ -118,6 +118,10 @@ private:
 	 */
 	void StartNavigation();
 	void OnInitializationFailed(const FString& Reason);
+	/** Tears the controller down and builds the other kind on the same host. */
+	FUXWebviewResult BeginControllerSwitch(bool bComposition, const FString& PageStateJson);
+	void OnPageStateCaptured(bool bSuccess, const FString& PageStateJson);
+	void ApplyPageState(const FString& PageStateJson);
 
 	void StartCapture();
 	/** PNG -> BGRA -> UTexture2D; runs after CapturePreview completes. */

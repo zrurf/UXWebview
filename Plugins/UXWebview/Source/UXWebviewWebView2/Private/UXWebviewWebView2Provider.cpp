@@ -37,6 +37,8 @@ constexpr double kBridgeTimeoutSeconds = 30.0;
 constexpr double kScriptTimeoutSeconds = 30.0;
 /** A capture that never reported back must not stall the ticker forever. */
 constexpr double kCaptureStallSeconds = 2.0;
+/** A controller switch waits no longer than this for the page state snapshot. */
+constexpr double kPageStateTimeoutSeconds = 2.0;
 /** CapturePreview reports this until the page has produced its first frame. */
 constexpr HRESULT kCaptureNotReady = HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
 
@@ -61,6 +63,46 @@ FString SerializeJsonString(const FString& Value)
 	Writer->WriteValue(Value);
 	Writer->Close();
 	return Out;
+}
+
+/**
+ * Controller switches reload the page, so the state a caller could lose is
+ * captured first: scroll position and form values, plus the caret of the field
+ * that had focus. Fields are matched by their index in the selector below; a
+ * page that builds forms after load can therefore drift, which is why only
+ * values are copied over and page-side JavaScript state is left alone.
+ */
+const TCHAR* const kPageStateSnapshotScript = TEXT(
+	"(function(){"
+	"var state={scroll:[window.scrollX||0,window.scrollY||0],fields:[]};"
+	"var els=document.querySelectorAll('input,textarea,select');"
+	"for(var i=0;i<els.length;i++){"
+	"var el=els[i];var type=(el.type||'').toLowerCase();"
+	"if(type==='file'||type==='password'){continue;}"
+	"var item={i:i};"
+	"if(type==='checkbox'||type==='radio'){item.checked=el.checked?1:0;}"
+	"else{item.value=el.value;}"
+	"if(document.activeElement===el){item.focus=1;"
+	"if(typeof el.selectionStart==='number'){"
+	"item.start=el.selectionStart;item.end=el.selectionEnd;}}"
+	"state.fields.push(item);}"
+	"return state;})()");
+
+FString BuildPageStateRestoreScript(const FString& StateJson)
+{
+	return FString::Printf(TEXT(
+		"(function(state){try{"
+		"var els=document.querySelectorAll('input,textarea,select');"
+		"for(var k=0;k<state.fields.length;k++){"
+		"var item=state.fields[k];var el=els[item.i];if(!el){continue;}"
+		"var type=(el.type||'').toLowerCase();"
+		"if(type==='checkbox'||type==='radio'){el.checked=item.checked===1;}"
+		"else if(item.value!==undefined){el.value=item.value;}"
+		"if(item.focus===1){try{el.focus();}catch(_){}"
+		"if(item.start!==undefined&&el.setSelectionRange){"
+		"try{el.setSelectionRange(item.start,item.end);}catch(_){}}}}"
+		"if(state.scroll){window.scrollTo(state.scroll[0],state.scroll[1]);}"
+		"}catch(_){}})(JSON.parse(%s));"), *SerializeJsonString(StateJson));
 }
 
 /** Bridge messages carry the payload as embedded JSON text; see docs/script-bridge.md. */
@@ -298,6 +340,17 @@ struct FUXWebviewWebView2State
 	bool bCompositionHosting = false;
 	/** Set while the page moves to the other controller and the URL is reloaded. */
 	bool bSwitchingController = false;
+	/** Set while the switch waits for the page state snapshot to come back. */
+	bool bSwitchPending = false;
+	/** The snapshot came back; the ticker performs the switch outside the COM event. */
+	bool bSwitchQueued = false;
+	/** Controller mode the pending switch moves to. */
+	bool bPendingComposition = false;
+	/** The snapshot must not stall the switch if the page never answers. */
+	double SwitchDeadline = 0.0;
+	/** Captured page state, applied once the reloaded page finishes navigation. */
+	FString PendingPageState;
+	bool bPendingStateRestore = false;
 	bool bTransparentBackground = false;
 	bool bVisible = true;
 	bool bComInitialized = false;
@@ -1568,9 +1621,10 @@ bool FUXWebviewWebView2Provider::IsCompositionOverlay() const
 
 /**
  * The page lives inside its controller, so changing modes closes it and builds
- * a new one on the same environment and host window. The current URL is
- * reloaded and page state is lost; transparency and windowed keyboard support
- * trade places.
+ * a new one on the same environment and host window. Scroll position and form
+ * values are captured first and reapplied after the reload; page-side
+ * JavaScript state does not survive. Transparency and windowed keyboard
+ * support trade places.
  */
 FUXWebviewResult FUXWebviewWebView2Provider::SetCompositionOverlay(bool bComposition)
 {
@@ -1593,14 +1647,44 @@ FUXWebviewResult FUXWebviewWebView2Provider::SetCompositionOverlay(bool bComposi
 		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady,
 			TEXT("the webview2 controller is not ready yet"));
 	}
-	if (State->bSwitchingController)
+	if (State->bSwitchingController || State->bSwitchPending)
 	{
 		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidState,
 			TEXT("a webview2 controller switch is already in progress"));
 	}
 
+	State->bSwitchPending = true;
+	State->bPendingComposition = bComposition;
+	State->SwitchDeadline = FPlatformTime::Seconds() + kPageStateTimeoutSeconds;
+
+	const FUXWebviewResult Captured = ExecuteScriptInternal(kPageStateSnapshotScript,
+		[this](bool bSuccess, const FString& ResultJson)
+		{
+			OnPageStateCaptured(bSuccess, ResultJson);
+		});
+	if (!Captured.bSuccess)
+	{
+		// Nothing readable to carry over (no ready page, no snapshot support); the
+		// switch still has to happen, just without preserved state.
+		State->bSwitchPending = false;
+		return BeginControllerSwitch(bComposition, FString());
+	}
+	return FUXWebviewResult::Ok();
+}
+
+FUXWebviewResult FUXWebviewWebView2Provider::BeginControllerSwitch(bool bComposition,
+	const FString& PageStateJson)
+{
+	if (!State.IsValid() || State->bShutdown)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::InvalidState,
+			TEXT("the webview2 view is shutting down"));
+	}
+
 	State->bSwitchingController = true;
 	State->bReady = false;
+	State->bPendingStateRestore = !PageStateJson.IsEmpty();
+	State->PendingPageState = PageStateJson;
 
 	if (State->WebView)
 	{
@@ -1631,6 +1715,8 @@ FUXWebviewResult FUXWebviewWebView2Provider::SetCompositionOverlay(bool bComposi
 		if (!bComposition)
 		{
 			State->bSwitchingController = false;
+			State->PendingPageState.Reset();
+			State->bPendingStateRestore = false;
 			return FUXWebviewResult::Fail(EUXWebviewResultCode::Unknown,
 				TEXT("WebView2 could not create another controller"));
 		}
@@ -1644,6 +1730,8 @@ FUXWebviewResult FUXWebviewWebView2Provider::SetCompositionOverlay(bool bComposi
 		if (!CreateController(false))
 		{
 			State->bSwitchingController = false;
+			State->PendingPageState.Reset();
+			State->bPendingStateRestore = false;
 			return FUXWebviewResult::Fail(EUXWebviewResultCode::Unknown,
 				TEXT("WebView2 could not create another controller"));
 		}
@@ -1655,6 +1743,32 @@ FUXWebviewResult FUXWebviewWebView2Provider::SetCompositionOverlay(bool bComposi
 			? TEXT("composition overlay (transparent, no typed input)")
 			: TEXT("windowed overlay (keyboard and IME available)"));
 	return FUXWebviewResult::Ok();
+}
+
+void FUXWebviewWebView2Provider::OnPageStateCaptured(bool bSuccess,
+	const FString& PageStateJson)
+{
+	if (!State.IsValid() || State->bShutdown || !State->bSwitchPending || State->bSwitchQueued)
+	{
+		return;
+	}
+
+	// Closing the controller from inside its own message handler is unsafe, so the
+	// snapshot is only queued here and the ticker performs the swap.
+	State->bSwitchQueued = true;
+	State->PendingPageState = bSuccess ? PageStateJson : FString();
+}
+
+void FUXWebviewWebView2Provider::ApplyPageState(const FString& PageStateJson)
+{
+	if (!State.IsValid() || State->bShutdown || !State->WebView)
+	{
+		return;
+	}
+
+	// The restore runs as fire-and-forget; a page that refuses the values simply
+	// keeps its defaults.
+	State->WebView->ExecuteScript(*BuildPageStateRestoreScript(PageStateJson), nullptr);
 }
 
 FUXWebviewResult FUXWebviewWebView2Provider::LoadURL(const FString& Url)
@@ -1671,6 +1785,9 @@ FUXWebviewResult FUXWebviewWebView2Provider::LoadURL(const FString& Url)
 	}
 
 	State->CurrentUrl = Url;
+	// The captured state belongs to the page the caller left behind.
+	State->bPendingStateRestore = false;
+	State->PendingPageState.Reset();
 	const HRESULT Hr = State->WebView->Navigate(*Url);
 	if (FAILED(Hr))
 	{
@@ -2342,6 +2459,32 @@ bool FUXWebviewWebView2Provider::Tick(float /*DeltaSeconds*/)
 
 	PollTimeouts();
 
+	// A page that never answers the snapshot must not block the switch forever.
+	if (State->bSwitchPending)
+	{
+		const double Now = FPlatformTime::Seconds();
+		if (State->bSwitchQueued || Now >= State->SwitchDeadline)
+		{
+			const bool bTimedOut = !State->bSwitchQueued;
+			const bool bTarget = State->bPendingComposition;
+			const FString PageState = MoveTemp(State->PendingPageState);
+			State->bSwitchPending = false;
+			State->bSwitchQueued = false;
+			State->PendingPageState.Reset();
+			if (bTimedOut)
+			{
+				UE_LOG(LogUXWebviewWebView2, Warning,
+					TEXT("page state snapshot timed out; switching without preserved state"));
+			}
+			const FUXWebviewResult Switch = BeginControllerSwitch(bTarget, PageState);
+			if (!Switch.bSuccess)
+			{
+				UE_LOG(LogUXWebviewWebView2, Warning,
+					TEXT("webview2 controller switch failed: %s"), *Switch.Message);
+			}
+		}
+	}
+
 	const double Now = FPlatformTime::Seconds();
 	if (State->bCaptureInFlight)
 	{
@@ -2802,6 +2945,21 @@ void FUXWebviewWebView2Provider::OnNavigationCompleted(bool bSuccess, int32 Erro
 	}
 
 	State->bReady = true;
+
+	// A controller switch brings the page back with its previous scroll position
+	// and form values; the restore runs before the load-completed notification so
+	// game code sees the page as the caller left it.
+	if (State->bPendingStateRestore)
+	{
+		State->bPendingStateRestore = false;
+		const FString PageState = MoveTemp(State->PendingPageState);
+		State->PendingPageState.Reset();
+		if (bSuccess && !PageState.IsEmpty())
+		{
+			ApplyPageState(PageState);
+		}
+	}
+
 	if (State->Client)
 	{
 		State->Client->OnViewLoadCompleted(State->CurrentUrl);

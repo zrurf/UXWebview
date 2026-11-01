@@ -212,12 +212,8 @@ FUXWebviewResult UUXWebview::SetCompositionOverlay(bool bComposition)
 	}
 
 	const FUXWebviewResult Result = Provider->SetCompositionOverlay(bComposition);
-	if (Result.bSuccess)
-	{
-		// Composition hosting is the only source of transparent overlays, and the
-		// provider reports the live mode, so the cached capabilities follow it.
-		Capabilities = Provider->GetCapabilities();
-	}
+	// The controller is rebuilt on the provider's next tick, so the capabilities
+	// refresh happens when the switched view finishes its reload.
 	return Result;
 }
 
@@ -362,6 +358,12 @@ void UUXWebview::OnViewLoadCompleted(const FString& Url)
 		return;
 	}
 	State = EUXWebviewState::Ready;
+	// Transparency depends on the live controller, and a composition switch only
+	// reports its new mode once the reloaded page finishes navigation.
+	if (Provider.IsValid())
+	{
+		Capabilities = Provider->GetCapabilities();
+	}
 	OnLoadCompleted.Broadcast(Url);
 }
 

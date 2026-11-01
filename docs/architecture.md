@@ -122,13 +122,17 @@ page background. Runtimes without composition support log a warning and fall bac
 to the regular windowed controller on the same host window.
 
 `SetCompositionOverlay` moves a running overlay between the two controller types,
-so a page can start transparent and gain a keyboard when it needs one. The switch
+so a page can start transparent and gain a keyboard when it needs one. The call
+returns immediately: the page state is snapshotted first, the swap runs on the
+next tick, and the new controller finishes when its reload completes. The switch
 tears the controller down and creates the other kind on the same host window:
 web view events are dropped, pending script and bridge callbacks are failed, and
-the current URL is loaded again. Page state, scroll position and page-side
-JavaScript state do not survive, and `OnReady` fires only once, when the view
-first becomes ready. The widget keeps its bounds and `bTransparency` follows the
-new mode.
+the current URL is loaded again. Scroll position, form values and the caret of
+the focused field are captured before the teardown and reapplied after
+navigation; page-side JavaScript state does not survive. A page that does not
+answer the snapshot within two seconds is switched without it. `OnReady` fires
+only once, when the view first becomes ready. The widget keeps its bounds and
+`bTransparency` follows the new mode.
 
 ## Input and IME
 
