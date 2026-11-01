@@ -31,7 +31,7 @@ Options:
 | --- | --- |
 | `-Config Shipping` | Client configuration (default `Shipping`) |
 | `-ArchiveDir <dir>` | Archive output; defaults to `Samples/UXWebviewSample/Saved/Package/Windows` |
-| `-BuildEditor` | Let UAT compile the editor target instead of `-nobuild` |
+| `-Build` | Let UAT compile the game target instead of passing `-nobuild` |
 | `-SkipHost` | Reuse the already staged host instead of rebuilding |
 
 The script rebuilds the host, runs `BuildCookRun -cook -stage -pak -archive`,

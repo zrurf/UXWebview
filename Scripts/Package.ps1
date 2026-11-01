@@ -1,13 +1,13 @@
 # Cooks, stages and archives the sample project with the CEF host bundled.
 # Usage: ./Scripts/Package.ps1 -EngineRoot 'E:\UnrealEngine\UE_5.8' [-Config Shipping]
-#        [-ArchiveDir <dir>] [-BuildEditor] [-SkipHost]
+#        [-ArchiveDir <dir>] [-Build] [-SkipHost]
 
 [CmdletBinding()]
 param(
 	[string]$EngineRoot = $env:UE_ROOT,
 	[string]$Config = 'Shipping',
 	[string]$ArchiveDir,
-	[switch]$BuildEditor,
+	[switch]$Build,
 	[switch]$SkipHost
 )
 
@@ -60,10 +60,16 @@ $uatArgs = @(
 	"-archivedirectory=$ArchiveDir"
 )
 
-if (-not $BuildEditor)
+if (-not $Build)
 {
 	# The plugin and sample are expected to be compiled already.
 	$uatArgs += '-nobuild'
+}
+else
+{
+	# BuildCookRun needs an explicit -build, otherwise staging looks for a
+	# Shipping receipt that was never produced.
+	$uatArgs += '-build'
 }
 
 & $runUat @uatArgs
@@ -72,7 +78,8 @@ if ($LASTEXITCODE -ne 0)
 	exit $LASTEXITCODE
 }
 
-$stagedHost = Join-Path $ArchiveDir 'Windows/UXWebviewSample/Binaries/Win64/UXWebviewHost/UXWebviewHost.exe'
+# BuildCookRun archives the project folder directly under the archive directory.
+$stagedHost = Join-Path $ArchiveDir 'UXWebviewSample/Binaries/Win64/UXWebviewHost/UXWebviewHost.exe'
 if (-not (Test-Path $stagedHost))
 {
 	Write-Error "packaged host missing: $stagedHost"
