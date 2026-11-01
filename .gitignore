@@ -15,10 +15,11 @@ Build/
 *.xcodeproj
 *.xcworkspace
 
-# Native host build output and downloaded CEF binaries
+# Native host build output and downloaded browser SDKs
 native/cef/
 native/build/
 native/out/
+native/third_party/webview2/
 
 # Tooling artifacts
 .screenshots/

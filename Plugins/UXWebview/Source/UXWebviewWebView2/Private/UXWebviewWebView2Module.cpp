@@ -1,17 +1,27 @@
 #include "Modules/ModuleManager.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogUXWebviewWebView2, Log, All);
+#include "UXWebviewWebView2Provider.h"
+
+DEFINE_LOG_CATEGORY(LogUXWebviewWebView2);
 
 class FUXWebviewWebView2Module : public IModuleInterface
 {
 public:
 	virtual void StartupModule() override
 	{
-		UE_LOG(LogUXWebviewWebView2, Log, TEXT("UXWebviewWebView2 module loaded"));
+#if PLATFORM_WINDOWS && defined(UXWEBVIEW_WITH_WEBVIEW2) && UXWEBVIEW_WITH_WEBVIEW2
+		RegisterWebView2Provider();
+#else
+		UE_LOG(LogUXWebviewWebView2, Log,
+			TEXT("WebView2 backend is not built for this platform"));
+#endif
 	}
 
 	virtual void ShutdownModule() override
 	{
+#if PLATFORM_WINDOWS && defined(UXWEBVIEW_WITH_WEBVIEW2) && UXWEBVIEW_WITH_WEBVIEW2
+		UnregisterWebView2Provider();
+#endif
 	}
 };
 
