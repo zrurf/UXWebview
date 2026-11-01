@@ -132,6 +132,51 @@ enum class EUXWebviewDisplayMode : uint8
 	Overlay UMETA(DisplayName = "Overlay")
 };
 
+/** What a page-initiated new window (window.open, target=_blank) does. */
+UENUM(BlueprintType)
+enum class EUXWebviewNewWindowPolicy : uint8
+{
+	/** Load the URL in this view, replacing the current page. */
+	SameView UMETA(DisplayName = "Same View"),
+	/** Hand the URL to the OS default browser. */
+	External UMETA(DisplayName = "External Browser"),
+	/** Cancel the window and report it through OnNewWindowRequested. */
+	Broadcast UMETA(DisplayName = "Broadcast")
+};
+
+/** Progress of one page download. */
+UENUM(BlueprintType)
+enum class EUXWebviewDownloadState : uint8
+{
+	Started UMETA(DisplayName = "Started"),
+	Completed UMETA(DisplayName = "Completed"),
+	Canceled UMETA(DisplayName = "Canceled")
+};
+
+USTRUCT(BlueprintType)
+struct UXWEBVIEW_API FUXWebviewDownloadInfo
+{
+	GENERATED_BODY()
+
+	/** URL the download was started from. */
+	UPROPERTY(BlueprintReadOnly, Category = "UXWebview")
+	FString Url;
+
+	/** Absolute file path the download writes to; empty when it was blocked. */
+	UPROPERTY(BlueprintReadOnly, Category = "UXWebview")
+	FString FilePath;
+
+	UPROPERTY(BlueprintReadOnly, Category = "UXWebview")
+	EUXWebviewDownloadState State = EUXWebviewDownloadState::Started;
+
+	UPROPERTY(BlueprintReadOnly, Category = "UXWebview")
+	int32 ReceivedBytes = 0;
+
+	/** Zero while the server has not reported a content length. */
+	UPROPERTY(BlueprintReadOnly, Category = "UXWebview")
+	int32 TotalBytes = 0;
+};
+
 /** Per-instance parameters; these never write back to global settings. */
 USTRUCT(BlueprintType)
 struct UXWEBVIEW_API FUXWebviewCreateParams
@@ -163,6 +208,17 @@ struct UXWEBVIEW_API FUXWebviewCreateParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UXWebview")
 	FString InitialUrl;
+
+	/** What window.open and target=_blank links do in this view. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UXWebview")
+	EUXWebviewNewWindowPolicy NewWindowPolicy = EUXWebviewNewWindowPolicy::SameView;
+
+	/**
+	 * Where downloads are saved. Empty uses Saved/UXWebview/Downloads; the
+	 * directory must exist or be creatable by the game process.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UXWebview")
+	FString DownloadDirectory;
 };
 
 /** Plain struct handed to providers; not exposed to Blueprint. */
@@ -175,6 +231,9 @@ struct FUXWebviewInitParams
 	bool bOverlay = false;
 	FString UserAgent;
 	FString InitialUrl;
+	EUXWebviewNewWindowPolicy NewWindowPolicy = EUXWebviewNewWindowPolicy::SameView;
+	/** Absolute download directory; never empty once Initialize builds it. */
+	FString DownloadDirectory;
 };
 
 UENUM(BlueprintType)

@@ -1,6 +1,7 @@
 #include "UUXWebview.h"
 
 #include "Engine/Texture2D.h"
+#include "Misc/Paths.h"
 #include "Provider/UXWebviewProviderRegistry.h"
 #include "UXWebviewLog.h"
 
@@ -47,6 +48,13 @@ FUXWebviewResult UUXWebview::Initialize(const FUXWebviewCreateParams& Params)
 	InitParams.bTransparent = Params.bTransparent;
 	InitParams.bOverlay = Params.DisplayMode == EUXWebviewDisplayMode::Overlay;
 	InitParams.InitialUrl = Params.InitialUrl;
+	InitParams.NewWindowPolicy = Params.NewWindowPolicy;
+	// The CEF host is a separate process, so its file APIs need an absolute
+	// path; a project-relative Saved path would resolve against another cwd.
+	InitParams.DownloadDirectory = FPaths::ConvertRelativePathToFull(
+		Params.DownloadDirectory.IsEmpty()
+			? FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UXWebview"), TEXT("Downloads"))
+			: Params.DownloadDirectory);
 
 	const FUXWebviewResult InitResult = Provider->Initialize(InitParams, this);
 	if (!InitResult.bSuccess)
@@ -442,6 +450,29 @@ void UUXWebview::OnViewScriptMessage(const FString& Name, const FString& Payload
 	}
 
 	OnScriptMessage.Broadcast(Name, PayloadJson, RequestId);
+}
+
+void UUXWebview::OnViewNewWindow(const FString& Url, const FString& FrameName)
+{
+	if (State == EUXWebviewState::Destroyed)
+	{
+		return;
+	}
+	UE_LOG(LogUXWebview, Log, TEXT("page requested a new window for '%s' (frame '%s')"),
+		*Url, *FrameName);
+	OnNewWindowRequested.Broadcast(Url, FrameName);
+}
+
+void UUXWebview::OnViewDownload(const FUXWebviewDownloadInfo& Info)
+{
+	if (State == EUXWebviewState::Destroyed)
+	{
+		return;
+	}
+	UE_LOG(LogUXWebview, Log, TEXT("download state %d: '%s' -> '%s' (%d/%d)"),
+		static_cast<int32>(Info.State), *Info.Url, *Info.FilePath,
+		Info.ReceivedBytes, Info.TotalBytes);
+	OnDownload.Broadcast(Info);
 }
 
 void UUXWebview::FailPendingScriptReplies(const FString& Reason)

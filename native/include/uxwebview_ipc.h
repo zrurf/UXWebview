@@ -73,7 +73,12 @@ typedef enum UxIpcType
     UXWV_IPC_EVENT_TITLE      = 33, /* payload {"title": "..."} */
     UXWV_IPC_EVENT_URL        = 34, /* payload {"url": "..."} */
     UXWV_IPC_EVENT_CRASH      = 35, /* payload {"reason": "..."} */
-    UXWV_IPC_EVENT_BRIDGE     = 36  /* payload {"name": "...", "payload": "...", "request": n} */
+    UXWV_IPC_EVENT_BRIDGE     = 36, /* payload {"name": "...", "payload": "...", "request": n} */
+    /* A page asked for a new window and the view policy is "broadcast". */
+    UXWV_IPC_EVENT_NEW_WINDOW = 37, /* payload {"url": "...", "name": "..."} */
+    /* payload {"url": "...", "file": "...", "state": "started|completed|canceled",
+       "received": n, "total": n} */
+    UXWV_IPC_EVENT_DOWNLOAD   = 38
 } UxIpcType;
 
 typedef enum UxIpcFlags

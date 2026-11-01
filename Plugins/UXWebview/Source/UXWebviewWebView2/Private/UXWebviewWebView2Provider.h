@@ -134,6 +134,10 @@ private:
 	void OnWebMessage(const FString& Message, const FString& SourceUrl);
 	void OnNavigationCompleted(bool bSuccess, int32 ErrorStatus, const FString& Url);
 	void OnProcessFailed(int32 Kind);
+	/** Applies the view's new-window policy; the popup itself never opens. */
+	void OnNewWindowRequested(const FString& Url, const FString& FrameName);
+	/** Rewrites the download path and reports its progress through the client. */
+	void OnDownloadStarting(ICoreWebView2DownloadStartingEventArgs* Args);
 	void OnScriptCompleted(uint32 RequestId, bool bSuccess, const FString& Result);
 	void ReplyToPage(int32 PageRequestId, bool bSuccess, const FString& ResultJson);
 	void CompleteBridgeRequest(int32 RequestId, bool bSuccess, const FString& ResultJson);

@@ -298,6 +298,11 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 	Spec.bVisible = !bOverlayMode;
 	Spec.bOverlay = bOverlayMode;
 	Spec.ParentHandle = ParentHandle;
+	Spec.NewWindowPolicy = InitParams.NewWindowPolicy == EUXWebviewNewWindowPolicy::External
+		? TEXT("external")
+		: (InitParams.NewWindowPolicy == EUXWebviewNewWindowPolicy::Broadcast
+			? TEXT("broadcast") : TEXT("same-view"));
+	Spec.DownloadDirectory = InitParams.DownloadDirectory;
 
 	FUXWebviewResult Result = FUXWebviewHostClient::Get().CreateInstance(Spec, this, InstanceId);
 	if (!Result.bSuccess)
@@ -836,6 +841,22 @@ void FUXWebviewCEFProvider::OnHostBridgeMessage(const FString& Name,
 void FUXWebviewCEFProvider::OnHostDevTools(const FString& Url)
 {
 	UE_LOG(LogUXWebviewCEFProvider, Log, TEXT("instance %u devtools at '%s'"), InstanceId, *Url);
+}
+
+void FUXWebviewCEFProvider::OnHostNewWindow(const FString& Url, const FString& FrameName)
+{
+	if (Client)
+	{
+		Client->OnViewNewWindow(Url, FrameName);
+	}
+}
+
+void FUXWebviewCEFProvider::OnHostDownload(const FUXWebviewDownloadInfo& Info)
+{
+	if (Client)
+	{
+		Client->OnViewDownload(Info);
+	}
 }
 
 bool FUXWebviewCEFProvider::Tick(float DeltaSeconds)

@@ -31,6 +31,16 @@ public:
 	virtual void OnHostBridgeMessage(const FString& Name, const FString& PayloadJson,
 		uint32 RequestId) = 0;
 	virtual void OnHostDevTools(const FString& Url) = 0;
+	/** Broadcast new-window policy only: the host canceled the window. */
+	virtual void OnHostNewWindow(const FString& Url, const FString& FrameName)
+	{
+		(void)Url;
+		(void)FrameName;
+	}
+	virtual void OnHostDownload(const FUXWebviewDownloadInfo& Info)
+	{
+		(void)Info;
+	}
 };
 
 /** Everything the host needs to create one browser. */
@@ -46,6 +56,10 @@ struct FUXWebviewHostInstanceSpec
 	bool bOverlay = false;
 	uint64 ParentHandle = 0;
 	FIntPoint Position = FIntPoint::ZeroValue;
+	/** "same-view", "external" or "broadcast"; see EUXWebviewNewWindowPolicy. */
+	FString NewWindowPolicy = TEXT("same-view");
+	/** Absolute download directory; empty blocks downloads. */
+	FString DownloadDirectory;
 };
 
 /**

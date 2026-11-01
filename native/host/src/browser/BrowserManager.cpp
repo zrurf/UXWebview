@@ -172,7 +172,8 @@ BrowserManager::~BrowserManager()
 bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
 	const std::string& url, int frameRate, bool visible, float deviceScale,
 	const std::vector<std::string>& allowedOrigins, bool overlay, uint64_t parentHandle,
-	int posX, int posY)
+	int posX, int posY, const std::string& newWindowPolicy,
+	const std::string& downloadDirectory)
 {
 	if (width <= 0 || height <= 0)
 	{
@@ -238,7 +239,7 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 		[this](uint32_t eventInstance, uint32_t type, const std::string& json)
 		{
 			Emit(eventInstance, type, json);
-		}, allowedOrigins);
+		}, allowedOrigins, newWindowPolicy, downloadDirectory);
 
 	Instance* raw = instance.get();
 	Instances[id] = std::move(instance);

@@ -107,6 +107,8 @@ public:
 	virtual void OnHostBridgeMessage(const FString& Name, const FString& PayloadJson,
 		uint32 RequestId) override;
 	virtual void OnHostDevTools(const FString& Url) override;
+	virtual void OnHostNewWindow(const FString& Url, const FString& FrameName) override;
+	virtual void OnHostDownload(const FUXWebviewDownloadInfo& Info) override;
 
 private:
 	FUXWebviewResult GuardInitialized() const;

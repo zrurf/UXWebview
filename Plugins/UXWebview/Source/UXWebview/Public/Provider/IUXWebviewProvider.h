@@ -36,6 +36,22 @@ public:
 			Reply(false, TEXT("no script message handler"));
 		}
 	}
+
+	/**
+	 * A page asked for a new window (window.open, target=_blank) while this
+	 * view uses the Broadcast policy. No window was created.
+	 */
+	virtual void OnViewNewWindow(const FString& Url, const FString& FrameName)
+	{
+		(void)Url;
+		(void)FrameName;
+	}
+
+	/** Progress of a page download; Started arrives before the file is written. */
+	virtual void OnViewDownload(const FUXWebviewDownloadInfo& Info)
+	{
+		(void)Info;
+	}
 };
 
 /**

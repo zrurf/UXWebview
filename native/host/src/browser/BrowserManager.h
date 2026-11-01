@@ -28,7 +28,8 @@ public:
 	bool Create(uint32_t id, const std::string& sharedMemoryName, int width, int height,
 		const std::string& url, int frameRate, bool visible, float deviceScale,
 		const std::vector<std::string>& allowedOrigins, bool overlay, uint64_t parentHandle,
-		int posX, int posY);
+		int posX, int posY, const std::string& newWindowPolicy,
+		const std::string& downloadDirectory);
 	void Destroy(uint32_t id);
 	void ShutdownAll();
 

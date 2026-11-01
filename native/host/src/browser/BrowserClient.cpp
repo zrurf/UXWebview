@@ -2,8 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <map>
 #include <sstream>
+
+#if defined(_WIN32)
+#include <Windows.h>
+#include <shellapi.h>
+#endif
 
 #include "cef_browser.h"
 #include "cef_frame.h"
@@ -38,6 +44,73 @@ std::string MakeUrlCodeJson(const std::string& url, int code)
 	CefRefPtr<CefValue> root = CefValue::Create();
 	root->SetDictionary(dict);
 	return CefWriteJSON(root, JSON_WRITER_DEFAULT).ToString();
+}
+
+std::string MakeNewWindowJson(const std::string& url, const std::string& name)
+{
+	CefRefPtr<CefDictionaryValue> dict = CefDictionaryValue::Create();
+	dict->SetString("url", url);
+	dict->SetString("name", name);
+	CefRefPtr<CefValue> root = CefValue::Create();
+	root->SetDictionary(dict);
+	return CefWriteJSON(root, JSON_WRITER_DEFAULT).ToString();
+}
+
+std::string MakeDownloadJson(const std::string& url, const std::string& file,
+	const char* state, int64_t received, int64_t total)
+{
+	CefRefPtr<CefDictionaryValue> dict = CefDictionaryValue::Create();
+	dict->SetString("url", url);
+	dict->SetString("file", file);
+	dict->SetString("state", state);
+	dict->SetInt("received", static_cast<int>(received));
+	dict->SetInt("total", static_cast<int>(total));
+	CefRefPtr<CefValue> root = CefValue::Create();
+	root->SetDictionary(dict);
+	return CefWriteJSON(root, JSON_WRITER_DEFAULT).ToString();
+}
+
+/**
+ * Resolves the file a download writes to. The suggested name keeps only its
+ * file name part so a page cannot write outside the download directory, and an
+ * existing file gets a numeric suffix instead of being overwritten.
+ */
+std::string DownloadTargetPath(const std::string& directory,
+	const std::string& suggested)
+{
+	std::filesystem::path dir(directory);
+	std::error_code error;
+	std::filesystem::create_directories(dir, error);
+	if (error)
+	{
+		UXWV_LOG_ERROR("download directory '%s' is unusable (%s)",
+			directory.c_str(), error.message().c_str());
+		return std::string();
+	}
+
+	std::filesystem::path name = std::filesystem::path(suggested).filename();
+	if (name.empty())
+	{
+		name = "download";
+	}
+
+	std::filesystem::path target = dir / name;
+	const std::string stem = target.stem().string();
+	const std::string extension = target.extension().string();
+	for (int index = 1; std::filesystem::exists(target) && index < 1000; ++index)
+	{
+		target = dir / (stem + " (" + std::to_string(index) + ")" + extension);
+	}
+
+	// std::filesystem hands back char8_t in C++20; CEF wants UTF-8 std::string.
+	const auto utf8 = target.u8string();
+	std::string path(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+#if defined(_WIN32)
+	// Chromium creates the download file through its own file APIs, which reject
+	// a path that mixes separators; keep every separator native.
+	std::replace(path.begin(), path.end(), '/', '\\');
+#endif
+	return path;
 }
 
 std::string WriteJson(CefRefPtr<CefValue> value)
@@ -237,7 +310,8 @@ private:
 
 BrowserClient::BrowserClient(uint32_t instanceId, FramePublisher* publisher, int width, int height,
 	float deviceScale, CreatedCallback onCreated, ClosedCallback onClosed,
-	BrowserEventCallback onEvent, std::vector<std::string> allowedOrigins)
+	BrowserEventCallback onEvent, std::vector<std::string> allowedOrigins,
+	const std::string& newWindowPolicy, const std::string& downloadDirectory)
 	: InstanceId(instanceId)
 	, Publisher(publisher)
 	, Width(width)
@@ -247,6 +321,8 @@ BrowserClient::BrowserClient(uint32_t instanceId, FramePublisher* publisher, int
 	, OnClosed(std::move(onClosed))
 	, OnEvent(std::move(onEvent))
 	, AllowedOrigins(std::move(allowedOrigins))
+	, NewWindowPolicy(newWindowPolicy.empty() ? "same-view" : newWindowPolicy)
+	, DownloadDirectory(downloadDirectory)
 {
 	UpdateDipSize();
 
@@ -478,6 +554,127 @@ void BrowserClient::OnBeforeClose(CefRefPtr<CefBrowser> browser)
 	{
 		OnClosed(InstanceId);
 	}
+}
+
+bool BrowserClient::OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+	int popupId, const CefString& targetUrl, const CefString& targetFrameName,
+	cef_window_open_disposition_t targetDisposition, bool userGesture,
+	const CefPopupFeatures& popupFeatures, CefWindowInfo& windowInfo,
+	CefRefPtr<CefClient>& client, CefBrowserSettings& settings,
+	CefRefPtr<CefDictionaryValue>& extraInfo, bool* noJavascriptAccess)
+{
+	(void)frame;
+	(void)popupId;
+	(void)targetDisposition;
+	(void)userGesture;
+	(void)popupFeatures;
+	(void)windowInfo;
+	(void)client;
+	(void)settings;
+	(void)extraInfo;
+	(void)noJavascriptAccess;
+
+	const std::string url = targetUrl.ToString();
+	UXWV_LOG_INFO("instance %u: new window '%s' policy=%s", InstanceId,
+		url.c_str(), NewWindowPolicy.c_str());
+
+	// The popup is always cancelled: an embedded UI has no separate browser
+	// window, so the view policy decides where the request goes instead.
+	if (NewWindowPolicy == "external")
+	{
+		if (!url.empty())
+		{
+#if defined(_WIN32)
+			::ShellExecuteW(nullptr, L"open", CefString(url).ToWString().c_str(),
+				nullptr, nullptr, SW_SHOWNORMAL);
+#else
+			UXWV_LOG_WARN("instance %u: external windows are Windows-only", InstanceId);
+#endif
+		}
+	}
+	else if (NewWindowPolicy == "broadcast")
+	{
+		Emit(UXWV_IPC_EVENT_NEW_WINDOW,
+			MakeNewWindowJson(url, targetFrameName.ToString()));
+	}
+	else if (!url.empty() && browser)
+	{
+		// Same view: the page replaces the current document. Scripts that open
+		// about:blank and then write into it cannot be served this way.
+		browser->GetMainFrame()->LoadURL(targetUrl);
+	}
+	else
+	{
+		UXWV_LOG_WARN("instance %u: new window without a URL cannot be followed",
+			InstanceId);
+	}
+	return true;
+}
+
+bool BrowserClient::OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+	CefRefPtr<CefDownloadItem> downloadItem, const CefString& suggestedName,
+	CefRefPtr<CefBeforeDownloadCallback> callback)
+{
+	(void)browser;
+	if (!downloadItem || !callback)
+	{
+		return false;
+	}
+
+	if (DownloadDirectory.empty())
+	{
+		// Returning true without continuing the callback cancels the download.
+		UXWV_LOG_WARN("instance %u: download '%s' has no destination",
+			InstanceId, suggestedName.ToString().c_str());
+		return true;
+	}
+
+	const std::string path = DownloadTargetPath(DownloadDirectory, suggestedName.ToString());
+	if (path.empty())
+	{
+		return true;
+	}
+
+	callback->Continue(CefString(path), false);
+	ActiveDownloads.insert(downloadItem->GetId());
+	Emit(UXWV_IPC_EVENT_DOWNLOAD, MakeDownloadJson(downloadItem->GetURL().ToString(),
+		path, "started", 0, downloadItem->GetTotalBytes()));
+	UXWV_LOG_INFO("instance %u: download '%s' -> '%s'", InstanceId,
+		downloadItem->GetURL().ToString().c_str(), path.c_str());
+	return true;
+}
+
+void BrowserClient::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+	CefRefPtr<CefDownloadItem> downloadItem,
+	CefRefPtr<CefDownloadItemCallback> callback)
+{
+	(void)browser;
+	(void)callback;
+	if (!downloadItem || !downloadItem->IsValid())
+	{
+		return;
+	}
+
+	const uint32_t id = downloadItem->GetId();
+	auto it = ActiveDownloads.find(id);
+	if (it == ActiveDownloads.end())
+	{
+		return;
+	}
+
+	const std::string state = downloadItem->IsComplete() ? "completed"
+		: downloadItem->IsCanceled() || downloadItem->IsInterrupted() ? "canceled"
+		: std::string();
+	if (state.empty())
+	{
+		return;
+	}
+
+	ActiveDownloads.erase(it);
+	Emit(UXWV_IPC_EVENT_DOWNLOAD, MakeDownloadJson(downloadItem->GetURL().ToString(),
+		downloadItem->GetFullPath().ToString(), state.c_str(),
+		downloadItem->GetReceivedBytes(), downloadItem->GetTotalBytes()));
+	UXWV_LOG_INFO("instance %u: download %u %s", InstanceId, id, state.c_str());
 }
 
 void BrowserClient::OnPaint(CefRefPtr<CefBrowser> browser,

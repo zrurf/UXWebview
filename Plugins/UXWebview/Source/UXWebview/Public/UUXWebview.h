@@ -19,6 +19,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FUXWebviewScriptResultDelegate,
 	int32, RequestId, bool, bSuccess, const FString&, ResultJson);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUXWebviewKeyboardRequest,
 	const FString&, PayloadJson);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FUXWebviewNewWindowDelegate,
+	const FString&, Url, const FString&, FrameName);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUXWebviewDownloadDelegate,
+	const FUXWebviewDownloadInfo&, Info);
 
 /**
  * One web content instance. Owned by UUXWebviewSubsystem and must only be used
@@ -182,6 +186,17 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
 	FUXWebviewScriptResultDelegate OnScriptResult;
 
+	/**
+	 * A page asked for a new window while the view uses the Broadcast policy.
+	 * No window was opened; gameplay decides what to do with the URL.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
+	FUXWebviewNewWindowDelegate OnNewWindowRequested;
+
+	/** A page download started, completed or was canceled. */
+	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
+	FUXWebviewDownloadDelegate OnDownload;
+
 	// IUXWebviewViewClient
 	virtual void OnViewReady() override;
 	virtual void OnViewLoadCompleted(const FString& Url) override;
@@ -189,6 +204,8 @@ public:
 	virtual void OnViewCrash(const FString& Reason) override;
 	virtual void OnViewScriptMessage(const FString& Name, const FString& PayloadJson,
 		int32 RequestId, FUXWebviewBridgeReply Reply) override;
+	virtual void OnViewNewWindow(const FString& Url, const FString& FrameName) override;
+	virtual void OnViewDownload(const FUXWebviewDownloadInfo& Info) override;
 
 protected:
 	virtual void BeginDestroy() override;

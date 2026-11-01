@@ -563,10 +563,12 @@ void HostApp::HandleCreate(const UxIpcMessage& message, const std::vector<uint8_
 	const int posY = GetInt(dict, "y", 0);
 	const std::string url = GetString(dict, "url");
 	const std::vector<std::string> allowedOrigins = GetStringList(dict, "origins");
+	const std::string newWindowPolicy = GetString(dict, "newWindow");
+	const std::string downloadDirectory = GetString(dict, "downloadDir");
 
 	const bool created = Manager.Create(message.Instance, sharedMemory, width, height,
 		url.empty() ? "about:blank" : url, frameRate, visible, deviceScale, allowedOrigins,
-		overlay, parentHandle, posX, posY);
+		overlay, parentHandle, posX, posY, newWindowPolicy, downloadDirectory);
 
 	CefRefPtr<CefDictionaryValue> reply = CefDictionaryValue::Create();
 	reply->SetBool("ok", created);

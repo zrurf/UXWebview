@@ -60,7 +60,7 @@ The sample project exposes console commands; any of them can be driven with
 
 | Command | Purpose |
 | --- | --- |
-| `UXWebviewSample.WidgetDemo` | Centered UMG panel; `[dpi] [seconds] [provider] [url] [fps] [width] [height] [overlay] [topLeft]`; width or height 0 fills the viewport; a positive `seconds` closes the demo |
+| `UXWebviewSample.WidgetDemo` | Centered UMG panel; `[dpi] [seconds] [provider] [url] [fps] [width] [height] [overlay] [topLeft] [newWindow]`; width or height 0 fills the viewport; a positive `seconds` closes the demo; `newWindow` is 0 same view, 1 external browser, 2 broadcast |
 | `UXWebviewSample.Hud` | HUD preset: top-left texture panel (CEF) |
 | `UXWebviewSample.Fullscreen` | Fullscreen preset: viewport-sized overlay (CEF) |
 | `UXWebviewSample.NullDemo` | Animated Null-provider panel; `[width] [height] [fps]` |

@@ -117,6 +117,19 @@ bool JsonBool(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field, bool bF
 	Object->TryGetBoolField(Field, bValue);
 	return bValue;
 }
+
+EUXWebviewDownloadState DownloadStateFromString(const FString& State)
+{
+	if (State == TEXT("completed"))
+	{
+		return EUXWebviewDownloadState::Completed;
+	}
+	if (State == TEXT("canceled"))
+	{
+		return EUXWebviewDownloadState::Canceled;
+	}
+	return EUXWebviewDownloadState::Started;
+}
 } // namespace
 
 FUXWebviewHostClient& FUXWebviewHostClient::Get()
@@ -631,6 +644,11 @@ void FUXWebviewHostClient::FlushPendingCreates()
 		Object->SetNumberField(TEXT("fps"), Instance.Spec.FrameRate);
 		Object->SetBoolField(TEXT("visible"), Instance.Spec.bVisible);
 		Object->SetStringField(TEXT("url"), Instance.Spec.Url);
+		Object->SetStringField(TEXT("newWindow"), Instance.Spec.NewWindowPolicy);
+		if (!Instance.Spec.DownloadDirectory.IsEmpty())
+		{
+			Object->SetStringField(TEXT("downloadDir"), Instance.Spec.DownloadDirectory);
+		}
 
 		if (Instance.Spec.bOverlay)
 		{
@@ -778,6 +796,25 @@ void FUXWebviewHostClient::Dispatch(const FUXWebviewIpcEnvelope& Envelope)
 		if (Client)
 		{
 			Client->OnHostDevTools(JsonString(Object, TEXT("url")));
+		}
+		break;
+	case UXWV_IPC_EVENT_NEW_WINDOW:
+		if (Client)
+		{
+			Client->OnHostNewWindow(JsonString(Object, TEXT("url")),
+				JsonString(Object, TEXT("name")));
+		}
+		break;
+	case UXWV_IPC_EVENT_DOWNLOAD:
+		if (Client)
+		{
+			FUXWebviewDownloadInfo Info;
+			Info.Url = JsonString(Object, TEXT("url"));
+			Info.FilePath = JsonString(Object, TEXT("file"));
+			Info.State = DownloadStateFromString(JsonString(Object, TEXT("state")));
+			Info.ReceivedBytes = JsonInt(Object, TEXT("received"), 0);
+			Info.TotalBytes = JsonInt(Object, TEXT("total"), 0);
+			Client->OnHostDownload(Info);
 		}
 		break;
 	default:

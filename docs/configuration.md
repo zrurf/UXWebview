@@ -37,6 +37,8 @@ bCompositionOverlay=True
 | `DpiScale` | CSS-to-pixel scale; `0` follows the widget layout scale |
 | `TargetFrameRate` | Frame request rate; the host never exceeds it |
 | `DisplayMode` | `Texture` (off-screen frame) or `Overlay` (native child window) |
+| `NewWindowPolicy` | `window.open` / `target=_blank`: `SameView`, `External` or `Broadcast`; see [api-reference.md](api-reference.md#new-windows-and-downloads) |
+| `DownloadDirectory` | Absolute download folder; empty uses `Saved/UXWebview/Downloads` |
 
 ## Providers
 

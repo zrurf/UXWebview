@@ -49,6 +49,10 @@ void BindBridgeHandler(UUXWebview* View)
 		&UUXWebviewSampleBridgeHandler::HandleScriptMessage);
 	View->OnKeyboardRequest.AddDynamic(GWidgetBridgeHandler,
 		&UUXWebviewSampleBridgeHandler::HandleKeyboardRequest);
+	View->OnNewWindowRequested.AddDynamic(GWidgetBridgeHandler,
+		&UUXWebviewSampleBridgeHandler::HandleNewWindow);
+	View->OnDownload.AddDynamic(GWidgetBridgeHandler,
+		&UUXWebviewSampleBridgeHandler::HandleDownload);
 }
 
 void StopWidgetDemo()
@@ -134,6 +138,9 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	const bool bOverlay = Args.Num() > 7 && FCString::Atoi(*Args[7]) != 0;
 	// Non-zero anchors the panel to the top-left corner, which is what a HUD wants.
 	const bool bTopLeft = Args.Num() > 8 && FCString::Atoi(*Args[8]) != 0;
+	// Optional 10th arg: 0 loads popups in this view, 1 opens the OS browser,
+	// 2 cancels them and reports through OnNewWindowRequested.
+	const int32 NewWindowArg = Args.Num() > 9 ? FCString::Atoi(*Args[9]) : 0;
 	const float BoxScale = Dpi > 0.0f ? Dpi : 1.0f;
 
 	FUXWebviewCreateParams Params;
@@ -152,6 +159,9 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	Params.TargetFrameRate = FrameRate;
 	Params.InitialUrl = Url;
 	Params.DisplayMode = bOverlay ? EUXWebviewDisplayMode::Overlay : EUXWebviewDisplayMode::Texture;
+	Params.NewWindowPolicy = NewWindowArg == 1 ? EUXWebviewNewWindowPolicy::External
+		: (NewWindowArg == 2 ? EUXWebviewNewWindowPolicy::Broadcast
+			: EUXWebviewNewWindowPolicy::SameView);
 
 	FUXWebviewResult Result;
 	UUXWebview* Webview = Subsystem->CreateWebview(Params, Result);
@@ -683,7 +693,7 @@ void SecondViewCommand(const TArray<FString>& Args, UWorld* World)
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetDemoCommand(
 	TEXT("UXWebviewSample.WidgetDemo"),
-	TEXT("UXWebviewSample.WidgetDemo [dpi] [seconds] [provider] [url] [fps] [width] [height] [overlay] [topLeft] - hosts the UMG webview widget in the viewport; width/height 0 fills the viewport"),
+	TEXT("UXWebviewSample.WidgetDemo [dpi] [seconds] [provider] [url] [fps] [width] [height] [overlay] [topLeft] [newWindow] - hosts the UMG webview widget in the viewport; width/height 0 fills the viewport; newWindow 0=same view, 1=external browser, 2=broadcast"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&StartWidgetDemo));
 
 FAutoConsoleCommandWithWorldAndArgs GWidgetHudCommand(

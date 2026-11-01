@@ -154,6 +154,37 @@ Pages can start that switch themselves: the reserved bridge name
 so game code only decides whether to call `EnsureKeyboardInput()`, which is
 `SetCompositionOverlay(false)` for composition views and a no-op elsewhere.
 
+## New windows and downloads
+
+Page-initiated popups (`window.open`, `target=_blank`) never create browser
+windows. CEF cancels them in `OnBeforePopup`; WebView2 cancels them in
+`NewWindowRequested` by setting `Handled`. Both then apply the view's
+`EUXWebviewNewWindowPolicy`: load the URL in the same view, hand it to the OS
+browser, or report it through `OnNewWindowRequested` without opening anything.
+Only the broadcast policy raises an event; same-view navigation is observable
+through `OnLoadCompleted`, and the external browser owns the URL.
+
+Downloads are redirected into the view's download directory. CEF does this in
+`CefDownloadHandler::OnBeforeDownload` with `CefBeforeDownloadCallback::Continue`,
+WebView2 in `DownloadStarting` by rewriting `ResultFilePath`. Both keep only the
+suggested file name, add a numeric suffix instead of overwriting, report
+`Started` before writing and then exactly one terminal state (`Completed` or
+`Canceled`) through `OnDownload`; WebView2 obtains the outcome from
+`ICoreWebView2DownloadOperation::StateChanged`. An empty directory blocks
+downloads, and the CEF host tracks reported download ids so a canceled item is
+never reported twice.
+
+The path handed to Chromium must use native separators. A path that mixes `/`
+and `\` makes the file write fail with `FILE_FAILED`, which surfaces as an
+interrupted download with zero bytes, so both providers normalize the target to
+`\` on Windows before reporting `Started`. The CEF host also needs an absolute
+path, because the plugin and the host are separate processes with different
+working directories.
+
+The CEF host receives the policy as `newWindow` (`same-view`, `external`,
+`broadcast`) and the folder as `downloadDir` in the create message, and reports
+`UXWV_IPC_EVENT_NEW_WINDOW` (37) and `UXWV_IPC_EVENT_DOWNLOAD` (38).
+
 ## Input and IME
 
 `SUXWebviewWidget` converts Slate-local positions to page CSS pixels with

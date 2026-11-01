@@ -7,6 +7,8 @@
 #include "Engine/Texture2D.h"
 #include "GenericPlatform/GenericWindow.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "IImageWrapperModule.h"
 #include "ImageCore.h"
 #include "Misc/Paths.h"
@@ -53,6 +55,56 @@ FString TakeComString(LPWSTR Value)
 	FString Result(Value);
 	CoTaskMemFree(Value);
 	return Result;
+}
+
+FUXWebviewDownloadInfo MakeDownloadInfo(const FString& Url, const FString& File,
+	EUXWebviewDownloadState DownloadState, int64 Received, int64 Total)
+{
+	FUXWebviewDownloadInfo Info;
+	Info.Url = Url;
+	Info.FilePath = File;
+	Info.State = DownloadState;
+	Info.ReceivedBytes = static_cast<int32>(Received);
+	Info.TotalBytes = static_cast<int32>(Total);
+	return Info;
+}
+
+/**
+ * Resolves the file a download writes to. Only the suggested file name is kept
+ * so a page cannot write outside the directory, and an existing file gets a
+ * numeric suffix instead of being overwritten. Empty means downloads are off.
+ */
+FString DownloadTargetPath(const FString& Directory, const FString& Suggested)
+{
+	if (Directory.IsEmpty())
+	{
+		return FString();
+	}
+
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	if (!PlatformFile.CreateDirectoryTree(*Directory) && !PlatformFile.DirectoryExists(*Directory))
+	{
+		UE_LOG(LogUXWebviewWebView2, Warning, TEXT("download directory '%s' is unusable"),
+			*Directory);
+		return FString();
+	}
+
+	const FString Name = Suggested.IsEmpty() ? FString(TEXT("download")) : Suggested;
+	const FString Stem = FPaths::GetBaseFilename(Name);
+	const FString Extension = FPaths::GetExtension(Name, true);
+	FString Target = FPaths::Combine(Directory, Name);
+	for (int32 Index = 1; PlatformFile.FileExists(*Target) && Index < 1000; ++Index)
+	{
+		Target = FPaths::Combine(Directory,
+			FString::Printf(TEXT("%s (%d)%s"), *Stem, Index, *Extension));
+	}
+
+#if PLATFORM_WINDOWS
+	// WebView2 hands the path to Chromium's file APIs, which fail on a path that
+	// mixes separators; keep every separator native.
+	Target.ReplaceInline(TEXT("/"), TEXT("\\"));
+#endif
+	return Target;
 }
 
 /** Quotes and escapes a string so it can be embedded in a script literal. */
@@ -320,6 +372,8 @@ struct FUXWebviewWebView2State
 	EventRegistrationToken ProcessFailedToken{};
 	EventRegistrationToken WebMessageToken{};
 	EventRegistrationToken CursorChangedToken{};
+	EventRegistrationToken NewWindowRequestedToken{};
+	EventRegistrationToken DownloadStartingToken{};
 
 	FUXWebviewWebView2Provider* Owner = nullptr;
 	IUXWebviewViewClient* Client = nullptr;
@@ -368,6 +422,10 @@ struct FUXWebviewWebView2State
 	double LastCaptureSeconds = 0.0;
 	FString CurrentUrl;
 	FString UserAgent;
+	/** What window.open and target=_blank do in this view. */
+	EUXWebviewNewWindowPolicy NewWindowPolicy = EUXWebviewNewWindowPolicy::SameView;
+	/** Absolute download directory; empty blocks downloads. */
+	FString DownloadDirectory;
 
 	UTexture2D* Texture = nullptr;
 	int32 TextureWidth = 0;
@@ -812,6 +870,8 @@ FUXWebviewResult FUXWebviewWebView2Provider::Initialize(
 	State->CurrentUrl = InitParams.InitialUrl.IsEmpty()
 		? FString(TEXT("about:blank")) : InitParams.InitialUrl;
 	State->UserAgent = InitParams.UserAgent;
+	State->NewWindowPolicy = InitParams.NewWindowPolicy;
+	State->DownloadDirectory = InitParams.DownloadDirectory;
 
 	// Overlay needs a real parent window; without one the texture pipeline is a
 	// better answer than silently dropping the view.
@@ -1458,6 +1518,55 @@ void FUXWebviewWebView2Provider::ConfigureWebView()
 			}).Get(),
 		&State->WebMessageToken);
 
+	State->WebView->add_NewWindowRequested(
+		Microsoft::WRL::Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+			[Captured](ICoreWebView2* /*Sender*/,
+				ICoreWebView2NewWindowRequestedEventArgs* Args) -> HRESULT
+			{
+				if (Captured->bShutdown || !Captured->Owner || !Args)
+				{
+					return S_OK;
+				}
+
+				LPWSTR Uri = nullptr;
+				Args->get_Uri(&Uri);
+				const FString Url = TakeComString(Uri);
+				FString FrameName;
+				ComPtr<ICoreWebView2NewWindowRequestedEventArgs2> Args2;
+				if (SUCCEEDED(Args->QueryInterface(
+					IID_ICoreWebView2NewWindowRequestedEventArgs2, &Args2)))
+				{
+					LPWSTR Name = nullptr;
+					Args2->get_Name(&Name);
+					FrameName = TakeComString(Name);
+				}
+
+				// The popup is always canceled; the policy decides what replaces it.
+				Args->put_Handled(1);
+				Captured->Owner->OnNewWindowRequested(Url, FrameName);
+				return S_OK;
+			}).Get(),
+		&State->NewWindowRequestedToken);
+
+	// DownloadStarting lives on ICoreWebView2_4; older runtimes just skip it.
+	ComPtr<ICoreWebView2_4> WebView4;
+	if (SUCCEEDED(State->WebView.As(&WebView4)) && WebView4)
+	{
+		WebView4->add_DownloadStarting(
+			Microsoft::WRL::Callback<ICoreWebView2DownloadStartingEventHandler>(
+				[Captured](ICoreWebView2* /*Sender*/,
+					ICoreWebView2DownloadStartingEventArgs* Args) -> HRESULT
+				{
+					if (Captured->bShutdown || !Captured->Owner || !Args)
+					{
+						return S_OK;
+					}
+					Captured->Owner->OnDownloadStarting(Args);
+					return S_OK;
+				}).Get(),
+			&State->DownloadStartingToken);
+	}
+
 	const TSharedPtr<FUXWebviewWebView2State> BootstrapState = State;
 	// AddScriptToExecuteOnDocumentCreated completes asynchronously. Navigation
 	// waits for it so the first document always has window.uxwv installed.
@@ -1557,6 +1666,12 @@ void FUXWebviewWebView2Provider::Shutdown()
 		State->WebView->remove_NavigationCompleted(State->NavigationCompletedToken);
 		State->WebView->remove_ProcessFailed(State->ProcessFailedToken);
 		State->WebView->remove_WebMessageReceived(State->WebMessageToken);
+		State->WebView->remove_NewWindowRequested(State->NewWindowRequestedToken);
+		ComPtr<ICoreWebView2_4> WebView4;
+		if (SUCCEEDED(State->WebView.As(&WebView4)) && WebView4)
+		{
+			WebView4->remove_DownloadStarting(State->DownloadStartingToken);
+		}
 	}
 	ReleaseCompositionVisual();
 	if (State->Controller)
@@ -3001,6 +3116,123 @@ void FUXWebviewWebView2Provider::OnProcessFailed(int32 Kind)
 		State->Client->OnViewCrash(FString::Printf(
 			TEXT("the WebView2 process failed (kind %d)"), Kind));
 	}
+}
+
+void FUXWebviewWebView2Provider::OnNewWindowRequested(const FString& Url,
+	const FString& FrameName)
+{
+	if (!State.IsValid() || State->bShutdown)
+	{
+		return;
+	}
+
+	switch (State->NewWindowPolicy)
+	{
+	case EUXWebviewNewWindowPolicy::External:
+		if (!Url.IsEmpty())
+		{
+			FPlatformProcess::LaunchURL(*Url, nullptr, nullptr);
+		}
+		break;
+	case EUXWebviewNewWindowPolicy::Broadcast:
+		if (State->Client)
+		{
+			State->Client->OnViewNewWindow(Url, FrameName);
+		}
+		break;
+	default:
+		// SameView: window.open('about:blank') carries no URL to navigate to.
+		if (!Url.IsEmpty() && State->WebView)
+		{
+			State->WebView->Navigate(*Url);
+		}
+		break;
+	}
+}
+
+void FUXWebviewWebView2Provider::OnDownloadStarting(ICoreWebView2DownloadStartingEventArgs* Args)
+{
+	if (!State.IsValid() || State->bShutdown || !Args || !State->Client)
+	{
+		return;
+	}
+
+	ComPtr<ICoreWebView2DownloadOperation> Operation;
+	Args->get_DownloadOperation(&Operation);
+
+	FString Url;
+	if (Operation)
+	{
+		LPWSTR Uri = nullptr;
+		Operation->get_Uri(&Uri);
+		Url = TakeComString(Uri);
+	}
+
+	LPWSTR SuggestedPath = nullptr;
+	Args->get_ResultFilePath(&SuggestedPath);
+	const FString Suggested = FPaths::GetCleanFilename(TakeComString(SuggestedPath));
+
+	// The shell dialog is replaced by the view's directory, so report it first.
+	// WebView2 commits the default path when Handled is set, so the result path
+	// and the cancel flag must be written before Handled.
+	const FString Target = DownloadTargetPath(State->DownloadDirectory, Suggested);
+	if (Target.IsEmpty())
+	{
+		Args->put_Cancel(1);
+		Args->put_Handled(1);
+		State->Client->OnViewDownload(MakeDownloadInfo(Url, FString(),
+			EUXWebviewDownloadState::Started, 0, 0));
+		return;
+	}
+
+	Args->put_ResultFilePath(*Target);
+	Args->put_Handled(1);
+	State->Client->OnViewDownload(MakeDownloadInfo(Url, Target,
+		EUXWebviewDownloadState::Started, 0, 0));
+
+	if (!Operation)
+	{
+		return;
+	}
+
+	// The outcome arrives through StateChanged; report it exactly once. Capturing
+	// only strings (not the operation) avoids a COM reference cycle.
+	const TSharedPtr<FUXWebviewWebView2State> Captured = State;
+	const TSharedPtr<bool> bReported = MakeShared<bool>(false);
+	const FString ReportedUrl = Url;
+	const FString ReportedFile = Target;
+	EventRegistrationToken Token{};
+	Operation->add_StateChanged(
+		Microsoft::WRL::Callback<ICoreWebView2StateChangedEventHandler>(
+			[Captured, bReported, ReportedUrl, ReportedFile](
+				ICoreWebView2DownloadOperation* Sender, IUnknown* /*Args*/) -> HRESULT
+			{
+				if (Captured->bShutdown || !Captured->Client || !Sender || *bReported)
+				{
+					return S_OK;
+				}
+
+				COREWEBVIEW2_DOWNLOAD_STATE DownloadState =
+					COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+				Sender->get_State(&DownloadState);
+				if (DownloadState == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS)
+				{
+					return S_OK;
+				}
+
+				*bReported = true;
+				INT64 Received = 0;
+				INT64 Total = 0;
+				Sender->get_BytesReceived(&Received);
+				Sender->get_TotalBytesToReceive(&Total);
+				Captured->Client->OnViewDownload(MakeDownloadInfo(ReportedUrl, ReportedFile,
+					DownloadState == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED
+						? EUXWebviewDownloadState::Completed
+						: EUXWebviewDownloadState::Canceled,
+					Received, Total));
+				return S_OK;
+			}).Get(),
+		&Token);
 }
 
 void RegisterWebView2Provider()

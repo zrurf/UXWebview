@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "UXWebviewTypes.h"
 
 #include "UXWebviewSample.generated.h"
 
@@ -23,6 +24,13 @@ public:
 	/** A page asked for typed input, so the demo drops composition hosting. */
 	UFUNCTION()
 	void HandleKeyboardRequest(const FString& PayloadJson);
+
+	/** Broadcast new-window policy: the demo only logs what the page asked for. */
+	UFUNCTION()
+	void HandleNewWindow(const FString& Url, const FString& FrameName);
+
+	UFUNCTION()
+	void HandleDownload(const FUXWebviewDownloadInfo& Info);
 
 private:
 	TWeakObjectPtr<UUXWebview> View;

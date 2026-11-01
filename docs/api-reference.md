@@ -29,6 +29,8 @@ Params.ProviderName = TEXT("");                 // empty: resolved from settings
 Params.ViewportSize = FIntPoint(1280, 720);
 Params.TargetFrameRate = 60;
 Params.InitialUrl = TEXT("https://example.com/");
+Params.NewWindowPolicy = EUXWebviewNewWindowPolicy::SameView; // window.open / target=_blank
+Params.DownloadDirectory = TEXT("");           // empty: Saved/UXWebview/Downloads
 
 FUXWebviewResult Result;
 UUXWebview* View = Subsystem->CreateWebview(Params, Result);
@@ -107,6 +109,8 @@ return `NotReady`.
 | `OnScriptMessage` | Assignable | `Name`, `PayloadJson`, `RequestId` |
 | `OnKeyboardRequest` | Assignable | `PayloadJson` |
 | `OnScriptResult` | Assignable | `RequestId`, `bSuccess`, `ResultJson` |
+| `OnNewWindowRequested` | Assignable | `Url`, `FrameName` |
+| `OnDownload` | Assignable | `Info` (`FUXWebviewDownloadInfo`) |
 
 `OnScriptResult` only fires for scripts started with `ExecuteScriptAsync`;
 `RequestId` is 0 when the call could not be started at all. The C++ overload
@@ -200,6 +204,43 @@ call travels a separate path (window messages for WebView2, IPC for CEF), so one
 physical event never reaches the page twice. Overlay views of both providers
 therefore accept synthetic mouse and key events, and CEF overlays also accept
 IME events.
+
+## New windows and downloads
+
+Both providers cancel every page-initiated popup and apply a per-view policy
+instead, so `window.open` and `target=_blank` never create browser windows
+outside the game.
+
+| `EUXWebviewNewWindowPolicy` | Behaviour |
+| --- | --- |
+| `SameView` | The URL replaces the current page; observe it through `OnLoadCompleted` |
+| `External` | The URL is handed to the OS default browser |
+| `Broadcast` | Nothing opens; `OnNewWindowRequested` reports `Url` and `FrameName` |
+
+Downloads are saved under `DownloadDirectory` (default
+`Saved/UXWebview/Downloads`, created on demand). Only the suggested file name is
+kept, and an existing file receives a numeric suffix instead of being
+overwritten. An empty directory passed to the provider blocks downloads. Every
+download reports through `OnDownload`:
+
+| `EUXWebviewDownloadState` | Meaning |
+| --- | --- |
+| `Started` | `FilePath` is final; the file is being written |
+| `Completed` | The file finished downloading |
+| `Canceled` | The download was interrupted or canceled |
+
+`FUXWebviewDownloadInfo` carries `Url`, `FilePath`, `State`, `ReceivedBytes` and
+`TotalBytes` (zero while the server has not reported a length). Progress events
+do not repeat; only `Started` and the terminal state are reported.
+
+A `download` attribute or a `Content-Disposition: attachment` response starts a
+download. Chromium ignores the attribute on `file://` pages and CEF rejects
+`blob:` URLs that come from the opaque `file://` origin, so test pages should be
+served over a local HTTP server.
+
+Known limitation: `window.open('about:blank')` followed by writing into the
+returned window is unsupported, because no window object is handed back to the
+page. The policy still applies to the requested URL.
 
 ## Script bridge
 

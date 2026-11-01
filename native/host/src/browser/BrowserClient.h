@@ -3,11 +3,13 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "cef_client.h"
 #include "cef_display_handler.h"
+#include "cef_download_handler.h"
 #include "cef_life_span_handler.h"
 #include "cef_load_handler.h"
 #include "cef_render_handler.h"
@@ -33,6 +35,7 @@ class BrowserClient : public CefClient,
                       public CefLifeSpanHandler,
                       public CefLoadHandler,
                       public CefDisplayHandler,
+                      public CefDownloadHandler,
                       public CefRequestHandler
 {
 public:
@@ -41,7 +44,9 @@ public:
 
 	BrowserClient(uint32_t instanceId, FramePublisher* publisher, int width, int height,
 		float deviceScale, CreatedCallback onCreated, ClosedCallback onClosed,
-		BrowserEventCallback onEvent, std::vector<std::string> allowedOrigins = {});
+		BrowserEventCallback onEvent, std::vector<std::string> allowedOrigins = {},
+		const std::string& newWindowPolicy = "same-view",
+		const std::string& downloadDirectory = std::string());
 
 	~BrowserClient() override;
 
@@ -50,6 +55,7 @@ public:
 	CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
 	CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
 	CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+	CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
 	CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 	bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
 		CefRefPtr<CefFrame> frame, CefProcessId sourceProcess,
@@ -72,6 +78,20 @@ public:
 	// CefLifeSpanHandler
 	void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
 	void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
+	bool OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+		int popupId, const CefString& targetUrl, const CefString& targetFrameName,
+		cef_window_open_disposition_t targetDisposition, bool userGesture,
+		const CefPopupFeatures& popupFeatures, CefWindowInfo& windowInfo,
+		CefRefPtr<CefClient>& client, CefBrowserSettings& settings,
+		CefRefPtr<CefDictionaryValue>& extraInfo, bool* noJavascriptAccess) override;
+
+	// CefDownloadHandler
+	bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+		CefRefPtr<CefDownloadItem> downloadItem, const CefString& suggestedName,
+		CefRefPtr<CefBeforeDownloadCallback> callback) override;
+	void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+		CefRefPtr<CefDownloadItem> downloadItem,
+		CefRefPtr<CefDownloadItemCallback> callback) override;
 
 	// CefLoadHandler
 	void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
@@ -142,6 +162,12 @@ private:
 	bool bLoggedPaintFallback = false;
 
 	std::vector<std::string> AllowedOrigins;
+	/** "same-view", "external" or "broadcast"; see OnBeforePopup. */
+	std::string NewWindowPolicy;
+	/** Empty blocks downloads; otherwise downloads are saved here. */
+	std::string DownloadDirectory;
+	/** Downloads that reported a start and still need an outcome event. */
+	std::set<uint32_t> ActiveDownloads;
 	/** uxwvQuery: page -> game queries, origin checked and held open for a reply. */
 	CefRefPtr<CefMessageRouterBrowserSide> BridgeRouter;
 	/** uxwvExec: results of ExecuteScript, sent by the wrapper the host runs. */

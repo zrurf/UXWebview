@@ -45,3 +45,15 @@ void UUXWebviewSampleBridgeHandler::HandleKeyboardRequest(const FString& Payload
 	UE_LOG(LogTemp, Log, TEXT("sample keyboard request ok=%d '%s'"),
 		Result.bSuccess ? 1 : 0, *Result.Message);
 }
+
+void UUXWebviewSampleBridgeHandler::HandleNewWindow(const FString& Url,
+	const FString& FrameName)
+{
+	UE_LOG(LogTemp, Log, TEXT("sample new window url='%s' frame='%s'"), *Url, *FrameName);
+}
+
+void UUXWebviewSampleBridgeHandler::HandleDownload(const FUXWebviewDownloadInfo& Info)
+{
+	UE_LOG(LogTemp, Log, TEXT("sample download state=%d file='%s' (%d/%d)"),
+		static_cast<int32>(Info.State), *Info.FilePath, Info.ReceivedBytes, Info.TotalBytes);
+}
