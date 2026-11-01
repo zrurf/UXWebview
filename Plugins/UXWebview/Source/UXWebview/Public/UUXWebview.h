@@ -17,6 +17,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FUXWebviewScriptMessageDelegate,
 	const FString&, Name, const FString&, PayloadJson, int32, RequestId);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FUXWebviewScriptResultDelegate,
 	int32, RequestId, bool, bSuccess, const FString&, ResultJson);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUXWebviewKeyboardRequest,
+	const FString&, PayloadJson);
 
 /**
  * One web content instance. Owned by UUXWebviewSubsystem and must only be used
@@ -98,6 +100,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "UXWebview")
 	bool IsCompositionOverlay() const;
 
+	/**
+	 * Switches a composition overlay back to a regular controller so the page
+	 * receives keyboard and IME input again. Does nothing on other views; the
+	 * switch is asynchronous, so query IsCompositionOverlay afterwards.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UXWebview")
+	FUXWebviewResult EnsureKeyboardInput();
+
 	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SetVisible(bool bVisible);
 
@@ -159,6 +169,14 @@ public:
 	/** A page called window.uxwv.call/emit; answer with RespondToScriptMessage. */
 	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
 	FUXWebviewScriptMessageDelegate OnScriptMessage;
+
+	/**
+	 * A page asked for typed input through the reserved 'request-keyboard'
+	 * bridge name. That query never reaches OnScriptMessage: it is already
+	 * answered, and gameplay decides whether to call EnsureKeyboardInput.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UXWebview")
+	FUXWebviewKeyboardRequest OnKeyboardRequest;
 
 	/** Reply for a script started with ExecuteScriptAsync, matched by RequestId. */
 	UPROPERTY(BlueprintAssignable, Category = "UXWebview")

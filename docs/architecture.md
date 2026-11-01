@@ -134,6 +134,11 @@ answer the snapshot within two seconds is switched without it. `OnReady` fires
 only once, when the view first becomes ready. The widget keeps its bounds and
 `bTransparency` follows the new mode.
 
+Pages can start that switch themselves: the reserved bridge name
+`request-keyboard` is answered by the plugin and broadcast as `OnKeyboardRequest`,
+so game code only decides whether to call `EnsureKeyboardInput()`, which is
+`SetCompositionOverlay(false)` for composition views and a no-op elsewhere.
+
 ## Input and IME
 
 `SUXWebviewWidget` converts Slate-local positions to page CSS pixels with
@@ -169,7 +174,8 @@ cursors are read with `add_CursorChanged` and applied on `WM_SETCURSOR`. A
 composition controller has no key or IME injection API, so `SendInput` reports
 `NotSupported` for `KeyDown`, `KeyUp`, `Char` and every IME event: composition
 overlay views show and click, but cannot receive typed text. Enable this mode only
-for views that do not need a keyboard.
+for views that do not need a keyboard, or let the page ask for one through
+`request-keyboard` and call `EnsureKeyboardInput()`.
 
 The widget follows the view rectangle for overlay views, so moving or resizing
 the widget moves the native window in client pixels.

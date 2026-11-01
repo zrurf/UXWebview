@@ -30,3 +30,18 @@ void UUXWebviewSampleBridgeHandler::HandleScriptMessage(const FString& Name,
 	Webview->RespondToScriptMessage(RequestId, true,
 		PayloadJson.IsEmpty() ? FString(TEXT("null")) : PayloadJson);
 }
+
+void UUXWebviewSampleBridgeHandler::HandleKeyboardRequest(const FString& PayloadJson)
+{
+	UE_LOG(LogTemp, Log, TEXT("sample keyboard request payload=%s"), *PayloadJson);
+
+	UUXWebview* Webview = View.Get();
+	if (!Webview)
+	{
+		return;
+	}
+
+	const FUXWebviewResult Result = Webview->EnsureKeyboardInput();
+	UE_LOG(LogTemp, Log, TEXT("sample keyboard request ok=%d '%s'"),
+		Result.bSuccess ? 1 : 0, *Result.Message);
+}

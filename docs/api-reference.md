@@ -77,6 +77,7 @@ return `NotReady`.
 | `IsOverlayMode()` | Pure | True when the provider composites through a native window |
 | `SetCompositionOverlay(bComposition)` | Callable | WebView2 overlay views only: moves the page to a composition controller (transparent, no typed input) or back. Captures scroll position, form values and the caret before the reload and reapplies them; the swap completes on the next tick |
 | `IsCompositionOverlay()` | Pure | True while the overlay renders through a composition controller |
+| `EnsureKeyboardInput()` | Callable | Composition overlays only: switches back through `SetCompositionOverlay(false)` so the page can type; a no-op on other views |
 | `LoadURL(Url)` | Callable | Absolute URL |
 | `LoadHTML(Html, BaseUrl)` | Callable | `BaseUrl` resolves relative links and bridge origin |
 | `Reload()` | Callable | |
@@ -104,6 +105,7 @@ return `NotReady`.
 | `OnLoadCompleted` | Assignable | `Url` |
 | `OnCrashed` | Assignable | `Reason` |
 | `OnScriptMessage` | Assignable | `Name`, `PayloadJson`, `RequestId` |
+| `OnKeyboardRequest` | Assignable | `PayloadJson` |
 | `OnScriptResult` | Assignable | `RequestId`, `bSuccess`, `ResultJson` |
 
 `OnScriptResult` only fires for scripts started with `ExecuteScriptAsync`;
@@ -187,7 +189,10 @@ WebView2 composition overlay views accept mouse events only: `KeyDown`, `KeyUp`,
 `Char` and IME events fail with `NotSupported`, and `bTransparency` is the flag
 that tells game code whether the provider can show a transparent page background.
 Call `SetCompositionOverlay(false)` when the page needs typed text; the view
-reloads and gains the regular controller's keyboard and IME path.
+reloads and gains the regular controller's keyboard and IME path. A page can ask
+for that itself: the reserved bridge name `request-keyboard` broadcasts
+`OnKeyboardRequest` and is already answered, so game code only has to decide
+whether to call `EnsureKeyboardInput()`.
 
 Every provider forwards `SendInput`, overlay views included. In a native overlay
 the browser window consumes real input straight from the OS, and a `SendInput`
@@ -206,6 +211,10 @@ From game code the contract is:
 3. Pass `ResultJson` as valid JSON text; it becomes the resolved value of the
    page promise.
 4. Unanswered calls fail after the provider timeout.
+
+The single reserved name is `request-keyboard`: it never reaches
+`OnScriptMessage`, it broadcasts `OnKeyboardRequest` and is answered with `{}`
+right after the delegates run, so a page can call it without any handler.
 
 If no handler is bound the plugin answers immediately with
 `no script message handler`, so the page never waits for a reply that cannot

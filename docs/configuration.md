@@ -73,6 +73,8 @@ WebView2 SDK offers no key or IME injection for composition controllers. Leave
 the setting off when the page needs a keyboard, or call
 `SetCompositionOverlay(false)` before the page asks for text input; the view
 reloads with the regular controller, carrying over the scroll position and form
-values, and `bTransparency` drops to false.
+values, and `bTransparency` drops to false. A page can request the same switch
+with `window.uxwv.call('request-keyboard', ...)`, which broadcasts
+`OnKeyboardRequest`; answer it with `EnsureKeyboardInput()`.
 
 Overlay and texture views can coexist in one process.

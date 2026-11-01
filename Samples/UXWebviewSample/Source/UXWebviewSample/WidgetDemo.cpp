@@ -47,6 +47,8 @@ void BindBridgeHandler(UUXWebview* View)
 	GWidgetBridgeHandler->AddToRoot();
 	View->OnScriptMessage.AddDynamic(GWidgetBridgeHandler,
 		&UUXWebviewSampleBridgeHandler::HandleScriptMessage);
+	View->OnKeyboardRequest.AddDynamic(GWidgetBridgeHandler,
+		&UUXWebviewSampleBridgeHandler::HandleKeyboardRequest);
 }
 
 void StopWidgetDemo()

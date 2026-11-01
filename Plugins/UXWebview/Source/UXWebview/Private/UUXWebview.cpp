@@ -222,6 +222,22 @@ bool UUXWebview::IsCompositionOverlay() const
 	return Provider.IsValid() && Provider->IsCompositionOverlay();
 }
 
+FUXWebviewResult UUXWebview::EnsureKeyboardInput()
+{
+	const FUXWebviewResult Ready = GuardReady();
+	if (!Ready.bSuccess)
+	{
+		return Ready;
+	}
+	// Regular controllers already own real keyboard input, so only a composition
+	// overlay has to trade transparency back for typing.
+	if (!IsCompositionOverlay())
+	{
+		return FUXWebviewResult::Ok();
+	}
+	return SetCompositionOverlay(false);
+}
+
 FUXWebviewResult UUXWebview::SetVisible(bool bVisible)
 {
 	const FUXWebviewResult Alive = GuardAlive();
@@ -398,6 +414,19 @@ void UUXWebview::OnViewScriptMessage(const FString& Name, const FString& Payload
 		if (Reply)
 		{
 			Reply(false, TEXT("webview is destroyed"));
+		}
+		return;
+	}
+
+	// Reserved bridge name: the page needs typed input, which a composition
+	// controller cannot deliver. The request is answered here so it never waits
+	// on gameplay, and gameplay decides how to rehost the view.
+	if (Name == TEXT("request-keyboard"))
+	{
+		OnKeyboardRequest.Broadcast(PayloadJson);
+		if (Reply)
+		{
+			Reply(true, TEXT("{}"));
 		}
 		return;
 	}
