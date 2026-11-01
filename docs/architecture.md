@@ -137,7 +137,9 @@ messages only reach the page while the browser window owns the OS keyboard
 focus, so the provider moves OS focus to that window before key events. Because
 the window never receives a native IME, composition is forwarded to page JavaScript
 (`window.__uxwvIme`) and committed into the focused editable element. Overlay
-mode input is handled by the native browser child window.
+mode input is handled by the native browser child window, which also means
+`SendInput` reports success without forwarding anything there: only texture mode
+and WebView2 composition overlay views can inject synthetic events.
 
 The off-screen host window stays shown (`SW_SHOWNOACTIVATE` at negative
 coordinates) while the view is visible: Chromium drops wheel input sent to a

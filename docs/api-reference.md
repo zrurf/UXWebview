@@ -185,6 +185,11 @@ WebView2 composition overlay views accept mouse events only: `KeyDown`, `KeyUp`,
 `Char` and IME events fail with `NotSupported`, and `bTransparency` is the flag
 that tells game code whether the provider can show a transparent page background.
 
+Overlay views of either provider (CEF or WebView2) are driven by their native
+browser window, so `SendInput` returns success without forwarding the event; the
+window system delivers real input there. Synthetic events reach the page in
+texture mode and in WebView2 composition overlay views.
+
 ## Script bridge
 
 Page side and failure modes are documented in [script-bridge.md](script-bridge.md).

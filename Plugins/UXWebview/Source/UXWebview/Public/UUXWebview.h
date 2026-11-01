@@ -117,7 +117,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	bool RespondToScriptMessage(int32 RequestId, bool bSuccess, const FString& ResultJson);
 
-	/** Routes one mouse, key or IME event; coordinates are view CSS pixels. */
+	/** Routes one mouse, key or IME event; coordinates are view CSS pixels.
+	 *  Overlay views are driven by their native browser window, so the call
+	 *  succeeds without forwarding anything there. */
 	UFUNCTION(BlueprintCallable, Category = "UXWebview")
 	FUXWebviewResult SendInput(const FUXWebviewInputEvent& Event);
 
