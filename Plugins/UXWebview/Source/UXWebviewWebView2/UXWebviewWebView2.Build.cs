@@ -42,6 +42,14 @@ public class UXWebviewWebView2 : ModuleRules
 				PublicDelayLoadDLLs.Add("WebView2Loader.dll");
 				RuntimeDependencies.Add("$(BinaryOutputDir)/WebView2Loader.dll", LoaderDll,
 					StagedFileType.NonUFS);
+
+				// Composition hosting draws the page into a DirectComposition visual,
+				// which needs a D3D11 device as the composition device.
+				PublicSystemLibraries.AddRange(new string[]
+				{
+					"d3d11.lib",
+					"dcomp.lib"
+				});
 			}
 			else
 			{

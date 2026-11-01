@@ -89,7 +89,7 @@ flags, not on provider names.
 | `bGpuSharedTexture` | false | true | false |
 | `bCpuPixelBuffer` | true | false | true |
 | `bOverlayMode` | false | true | true |
-| `bTransparency` | false | false | false |
+| `bTransparency` | false | false | follows `bCompositionOverlay` |
 | `bExternalBeginFrame` | false | true | false |
 | `bDevTools` | false | follows `bEnableDevTools` | follows `bEnableDevTools` |
 | `bOfflineCache` | false | true | true |
@@ -112,6 +112,15 @@ lives in a host window positioned off-screen (see "Input and IME" for why it
 stays shown). Overlay mode bypasses this path entirely: the page is a native
 child window and Chromium composites it.
 
+**WebView2 composition overlay.** When `bCompositionOverlay` is enabled, overlay
+views are created through `ICoreWebView2Environment3::CreateCoreWebView2CompositionController`.
+The provider owns a D3D11 device, creates a DirectComposition target for the host
+window, and passes the root visual to `put_RootVisualTarget`; Chromium then mixes
+the page into the window. No capture or upload happens, so the view keeps the full
+frame rate, `bTransparency` is reported and `bTransparent` requests a transparent
+page background. Runtimes without composition support log a warning and fall back
+to the regular windowed controller on the same host window.
+
 ## Input and IME
 
 `SUXWebviewWidget` converts Slate-local positions to page CSS pixels with
@@ -133,6 +142,17 @@ mode input is handled by the native browser child window.
 The off-screen host window stays shown (`SW_SHOWNOACTIVATE` at negative
 coordinates) while the view is visible: Chromium drops wheel input sent to a
 hidden window but not to a visible off-screen one.
+
+**WebView2 composition overlay.** No browser child window exists to consume
+input, so the provider subclasses the host window procedure: mouse move, button,
+wheel and leave messages become `SendMouseInput` calls, and the widget's
+`FUXWebviewInputEvent` values take the same route. Wheel deltas are passed as the
+raw signed value because `SendMouseInput` ignores the `MAKELPARAM` encoding. Page
+cursors are read with `add_CursorChanged` and applied on `WM_SETCURSOR`. A
+composition controller has no key or IME injection API, so `SendInput` reports
+`NotSupported` for `KeyDown`, `KeyUp`, `Char` and every IME event: composition
+overlay views show and click, but cannot receive typed text. Enable this mode only
+for views that do not need a keyboard.
 
 The widget follows the view rectangle for overlay views, so moving or resizing
 the widget moves the native window in client pixels.

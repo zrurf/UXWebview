@@ -85,6 +85,14 @@ private:
 	void ApplyVisibility();
 
 	/**
+	 * Composition overlay only: builds the D3D11 + DirectComposition device
+	 * chain, binds the root visual to the composition controller and registers
+	 * the page cursor handler. Returns false when the chain cannot be created.
+	 */
+	bool SetupCompositionVisual();
+	void ReleaseCompositionVisual();
+
+	/**
 	 * Kicks off the asynchronous environment/controller creation chain.
 	 * Returns immediately; the result reports whether the chain could be started.
 	 */
@@ -122,6 +130,12 @@ private:
 	HWND AcquireInputFocus();
 	void ReleaseInputFocus(HWND PreviousFocus);
 	FUXWebviewResult SendWin32Input(const FUXWebviewInputEvent& Event);
+	/**
+	 * Composition overlay only. Mouse events become SendMouseInput calls; key
+	 * and IME events report NotSupported because the SDK exposes no way to feed
+	 * them to a composition controller.
+	 */
+	FUXWebviewResult SendCompositionInput(const FUXWebviewInputEvent& Event);
 	void SendImeCommand(const FString& Command, const FString& Text);
 
 	TSharedPtr<FUXWebviewWebView2State> State;

@@ -41,6 +41,16 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Debug")
 	int32 DevToolsPort = 9222;
 
+	/**
+	 * Hosts WebView2 overlay views with ICoreWebView2CompositionController and
+	 * DirectComposition instead of a regular controller. This enables transparent
+	 * page backgrounds and page cursor reporting, but composition hosting has no
+	 * keyboard or IME path through the WebView2 SDK: overlay views cannot receive
+	 * typed text in this mode. Texture mode and CEF views are unaffected.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "WebView2")
+	bool bCompositionOverlay = false;
+
 	/** Host process exits after this many idle seconds with no views. */
 	UPROPERTY(config, EditAnywhere, Category = "Host")
 	int32 IdleShutdownSeconds = 30;

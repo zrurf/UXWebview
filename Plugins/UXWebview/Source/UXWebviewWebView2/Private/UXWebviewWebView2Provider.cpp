@@ -19,6 +19,8 @@
 #include "Widgets/SWindow.h"
 
 #include "Windows/AllowWindowsPlatformTypes.h"
+#include <dcomp.h>
+#include <d3d11.h>
 #include <objidl.h>
 #include <windows.h>
 #include "Windows/HideWindowsPlatformTypes.h"
@@ -264,20 +266,35 @@ struct FUXWebviewWebView2State
 	ComPtr<ICoreWebView2Controller> Controller;
 	ComPtr<ICoreWebView2> WebView;
 
+	// Composition overlay only; null for texture mode and regular overlays.
+	ComPtr<ICoreWebView2CompositionController> CompositionController;
+	ComPtr<ID3D11Device> D3DDevice;
+	ComPtr<ID3D11DeviceContext> D3DContext;
+	ComPtr<IDCompositionDevice> CompositionDevice;
+	ComPtr<IDCompositionTarget> CompositionTarget;
+	ComPtr<IDCompositionVisual> CompositionVisual;
+
 	EventRegistrationToken NavigationCompletedToken{};
 	EventRegistrationToken ProcessFailedToken{};
 	EventRegistrationToken WebMessageToken{};
+	EventRegistrationToken CursorChangedToken{};
 
 	FUXWebviewWebView2Provider* Owner = nullptr;
 	IUXWebviewViewClient* Client = nullptr;
 
 	HWND HostWindow = nullptr;
 	HWND InputWindow = nullptr;
+	/** Window procedure saved when composition hosting subclasses the host. */
+	WNDPROC OriginalHostProc = nullptr;
+	HCURSOR PageCursor = nullptr;
+	bool bMouseTracking = false;
 
 	bool bShutdown = false;
 	bool bInitialized = false;
 	bool bReady = false;
 	bool bOverlayMode = false;
+	bool bCompositionHosting = false;
+	bool bTransparentBackground = false;
 	bool bVisible = true;
 	bool bComInitialized = false;
 	bool bCaptureInFlight = false;
@@ -307,6 +324,224 @@ struct FUXWebviewWebView2State
 	TMap<int32, TSharedPtr<FUXWebviewBridgeRequest>> PendingBridge;
 	int32 NextBridgeRequestId = 1;
 };
+
+namespace
+{
+/** Mouse button and modifier state in COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS bits. */
+UINT32 CompositionVirtualKeys(WPARAM ButtonState)
+{
+	UINT32 Keys = 0;
+	if (ButtonState & MK_LBUTTON)
+	{
+		Keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_LEFT_BUTTON;
+	}
+	if (ButtonState & MK_RBUTTON)
+	{
+		Keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_RIGHT_BUTTON;
+	}
+	if (ButtonState & MK_MBUTTON)
+	{
+		Keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_MIDDLE_BUTTON;
+	}
+	if (ButtonState & MK_XBUTTON1)
+	{
+		Keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_X_BUTTON1;
+	}
+	if (ButtonState & MK_XBUTTON2)
+	{
+		Keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_X_BUTTON2;
+	}
+	if (ButtonState & MK_SHIFT)
+	{
+		Keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_SHIFT;
+	}
+	if (ButtonState & MK_CONTROL)
+	{
+		Keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_CONTROL;
+	}
+	return Keys;
+}
+
+/**
+ * SendMouseInput takes device independent pixels relative to the view, while
+ * window messages carry physical client pixels, so both paths go through here.
+ */
+POINT CompositionPoint(const FUXWebviewWebView2State& State, int32 X, int32 Y)
+{
+	const float Scale = State.OverlayDpiScale > 0.0f ? State.OverlayDpiScale : 1.0f;
+	POINT Point = { FMath::RoundToInt(X / Scale), FMath::RoundToInt(Y / Scale) };
+	return Point;
+}
+
+void SendCompositionMouse(FUXWebviewWebView2State& State,
+	COREWEBVIEW2_MOUSE_EVENT_KIND Kind, UINT32 VirtualKeys, UINT32 MouseData, POINT Point)
+{
+	if (State.bShutdown || !State.CompositionController)
+	{
+		return;
+	}
+	State.CompositionController->SendMouseInput(Kind,
+		static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(VirtualKeys), MouseData, Point);
+}
+
+int32 PackedCoordinate(LPARAM LParam, bool bHigh)
+{
+	const uint16 Raw = bHigh ? HIWORD(LParam) : LOWORD(LParam);
+	return static_cast<int32>(static_cast<int16>(Raw));
+}
+
+/**
+ * Composition overlay has no browser child window, so the host window receives
+ * mouse messages and forwards them with SendMouseInput. Keyboard stays broken
+ * here: the SDK exposes no injection API for composition controllers.
+ */
+LRESULT CALLBACK CompositionHostProc(HWND Window, UINT Message, WPARAM WParam, LPARAM LParam)
+{
+	const FUXWebviewWebView2State* ConstState =
+		reinterpret_cast<const FUXWebviewWebView2State*>(GetWindowLongPtrW(Window, GWLP_USERDATA));
+	FUXWebviewWebView2State* State = const_cast<FUXWebviewWebView2State*>(ConstState);
+	const WNDPROC Original = (State && State->OriginalHostProc)
+		? State->OriginalHostProc : DefWindowProcW;
+
+	if (!State || State->bShutdown || !State->CompositionController)
+	{
+		return Original(Window, Message, WParam, LParam);
+	}
+
+	switch (Message)
+	{
+	case WM_SETCURSOR:
+		if (State->PageCursor)
+		{
+			::SetCursor(State->PageCursor);
+			return 1;
+		}
+		break;
+
+	case WM_MOUSEMOVE:
+	{
+		if (!State->bMouseTracking)
+		{
+			TRACKMOUSEEVENT Track = {};
+			Track.cbSize = sizeof(Track);
+			Track.dwFlags = TME_LEAVE;
+			Track.hwndTrack = Window;
+			TrackMouseEvent(&Track);
+			State->bMouseTracking = true;
+		}
+		SendCompositionMouse(*State, COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+			CompositionVirtualKeys(WParam), 0,
+			CompositionPoint(*State, PackedCoordinate(LParam, false), PackedCoordinate(LParam, true)));
+		return 0;
+	}
+
+	case WM_MOUSELEAVE:
+		State->bMouseTracking = false;
+		SendCompositionMouse(*State, COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE, 0, 0,
+			POINT{ 0, 0 });
+		return 0;
+
+	case WM_LBUTTONDOWN:
+	case WM_RBUTTONDOWN:
+	case WM_MBUTTONDOWN:
+	case WM_XBUTTONDOWN:
+	{
+		const COREWEBVIEW2_MOUSE_EVENT_KIND Kind =
+			Message == WM_LBUTTONDOWN ? COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN
+			: Message == WM_RBUTTONDOWN ? COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN
+			: Message == WM_MBUTTONDOWN ? COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN
+			: COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOWN;
+		const UINT32 MouseData =
+			Message == WM_XBUTTONDOWN ? static_cast<UINT32>(HIWORD(WParam)) : 0;
+		if (Message == WM_LBUTTONDOWN)
+		{
+			State->MouseButtons |= MK_LBUTTON;
+		}
+		else if (Message == WM_RBUTTONDOWN)
+		{
+			State->MouseButtons |= MK_RBUTTON;
+		}
+		else if (Message == WM_MBUTTONDOWN)
+		{
+			State->MouseButtons |= MK_MBUTTON;
+		}
+		if (!::GetCapture())
+		{
+			// Keep drags alive when the cursor leaves the view, the way a browser
+			// child window would.
+			::SetCapture(Window);
+		}
+		SendCompositionMouse(*State, Kind,
+			CompositionVirtualKeys(WParam) | CompositionVirtualKeys(State->MouseButtons),
+			MouseData,
+			CompositionPoint(*State, PackedCoordinate(LParam, false), PackedCoordinate(LParam, true)));
+		if (State->Controller)
+		{
+			State->Controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+		}
+		return 0;
+	}
+
+	case WM_LBUTTONUP:
+	case WM_RBUTTONUP:
+	case WM_MBUTTONUP:
+	case WM_XBUTTONUP:
+	{
+		const COREWEBVIEW2_MOUSE_EVENT_KIND Kind =
+			Message == WM_LBUTTONUP ? COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP
+			: Message == WM_RBUTTONUP ? COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP
+			: Message == WM_MBUTTONUP ? COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP
+			: COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_UP;
+		const UINT32 MouseData =
+			Message == WM_XBUTTONUP ? static_cast<UINT32>(HIWORD(WParam)) : 0;
+		if (Message == WM_LBUTTONUP)
+		{
+			State->MouseButtons &= ~MK_LBUTTON;
+		}
+		else if (Message == WM_RBUTTONUP)
+		{
+			State->MouseButtons &= ~MK_RBUTTON;
+		}
+		else if (Message == WM_MBUTTONUP)
+		{
+			State->MouseButtons &= ~MK_MBUTTON;
+		}
+		SendCompositionMouse(*State, Kind, CompositionVirtualKeys(WParam), MouseData,
+			CompositionPoint(*State, PackedCoordinate(LParam, false), PackedCoordinate(LParam, true)));
+		if (State->MouseButtons == 0 && ::GetCapture() == Window)
+		{
+			::ReleaseCapture();
+		}
+		return 0;
+	}
+
+	case WM_MOUSEWHEEL:
+	case WM_MOUSEHWHEEL:
+	{
+		// Wheel deltas travel as the raw signed value; MAKELPARAM encoding is
+		// ignored by SendMouseInput.
+		const int32 Delta = GET_WHEEL_DELTA_WPARAM(WParam);
+		POINT Point = { PackedCoordinate(LParam, false), PackedCoordinate(LParam, true) };
+		if (!::ScreenToClient(Window, &Point))
+		{
+			return 0;
+		}
+		const COREWEBVIEW2_MOUSE_EVENT_KIND Kind = Message == WM_MOUSEWHEEL
+			? COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL
+			: COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL;
+		SendCompositionMouse(*State, Kind, CompositionVirtualKeys(WParam),
+			static_cast<UINT32>(Delta),
+			CompositionPoint(*State, Point.x, Point.y));
+		return 0;
+	}
+
+	default:
+		break;
+	}
+
+	return Original(Window, Message, WParam, LParam);
+}
+} // namespace
 
 namespace
 {
@@ -489,6 +724,9 @@ FUXWebviewCapabilities FUXWebviewWebView2Provider::GetCapabilities() const
 	FUXWebviewCapabilities Capabilities;
 	Capabilities.bCpuPixelBuffer = true;
 	Capabilities.bOverlayMode = true;
+	// Only a composition overlay can show the page over the game with a
+	// transparent background; texture mode always renders an opaque page.
+	Capabilities.bTransparency = UUXWebviewSettings::Get().bCompositionOverlay;
 	Capabilities.bOfflineCache = true;
 	Capabilities.bDevTools = UUXWebviewSettings::Get().bEnableDevTools;
 	Capabilities.MaxFrameRate = kMaxFrameRate;
@@ -538,6 +776,11 @@ FUXWebviewResult FUXWebviewWebView2Provider::Initialize(
 		}
 	}
 	State->bOverlayMode = ParentHandle != 0;
+	// Composition hosting is opt-in: it buys transparency and page cursors but
+	// leaves the overlay without a keyboard or IME path.
+	State->bCompositionHosting = State->bOverlayMode
+		&& UUXWebviewSettings::Get().bCompositionOverlay;
+	State->bTransparentBackground = InitParams.bTransparent;
 
 	CreateHostWindow(State->bOverlayMode, ParentHandle);
 	if (!State->HostWindow)
@@ -571,8 +814,9 @@ FUXWebviewResult FUXWebviewWebView2Provider::Initialize(
 		FTickerDelegate::CreateRaw(this, &FUXWebviewWebView2Provider::Tick));
 
 	UE_LOG(LogUXWebviewWebView2, Log,
-		TEXT("webview2 view created: %s %dx%d scale=%.2f fps=%d url='%s'"),
+		TEXT("webview2 view created: %s%s %dx%d scale=%.2f fps=%d url='%s'"),
 		State->bOverlayMode ? TEXT("overlay") : TEXT("texture"),
+		State->bCompositionHosting ? TEXT(" (composition)") : TEXT(""),
 		State->ViewSize.X, State->ViewSize.Y, State->DpiScale, State->FrameRate,
 		*State->CurrentUrl);
 	return FUXWebviewResult::Ok();
@@ -622,6 +866,18 @@ void FUXWebviewWebView2Provider::CreateHostWindow(bool bOverlay, uint64 ParentHa
 	}
 
 	ShowWindow(State->HostWindow, bOverlay ? SW_HIDE : SW_SHOWNOACTIVATE);
+
+	if (bOverlay && State->bCompositionHosting)
+	{
+		// Nothing inside the host turns window messages into page input, so the
+		// provider takes over the window procedure and forwards them itself.
+		State->OriginalHostProc = reinterpret_cast<WNDPROC>(
+			GetWindowLongPtrW(State->HostWindow, GWLP_WNDPROC));
+		SetWindowLongPtrW(State->HostWindow, GWLP_USERDATA,
+			reinterpret_cast<LONG_PTR>(State.Get()));
+		SetWindowLongPtrW(State->HostWindow, GWLP_WNDPROC,
+			reinterpret_cast<LONG_PTR>(&CompositionHostProc));
+	}
 }
 
 void FUXWebviewWebView2Provider::DestroyHostWindow()
@@ -700,6 +956,159 @@ void FUXWebviewWebView2Provider::ApplyVisibility()
 	}
 }
 
+bool FUXWebviewWebView2Provider::SetupCompositionVisual()
+{
+	if (!State.IsValid() || !State->CompositionController || !State->HostWindow)
+	{
+		return false;
+	}
+
+	// WebView2 composites into a visual, so it needs a composition device. The
+	// plugin never renders with this device itself.
+	const D3D_FEATURE_LEVEL Levels[] =
+	{
+		D3D_FEATURE_LEVEL_11_0,
+		D3D_FEATURE_LEVEL_10_1,
+		D3D_FEATURE_LEVEL_10_0
+	};
+	D3D_FEATURE_LEVEL Reached = D3D_FEATURE_LEVEL_10_0;
+	const HRESULT DeviceResult = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE,
+		nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, Levels, UE_ARRAY_COUNT(Levels),
+		D3D11_SDK_VERSION, &State->D3DDevice, &Reached, &State->D3DContext);
+	if (FAILED(DeviceResult) || !State->D3DDevice)
+	{
+		UE_LOG(LogUXWebviewWebView2, Error,
+			TEXT("composition hosting needs a hardware D3D11 device (0x%08X)"),
+			static_cast<uint32>(DeviceResult));
+		return false;
+	}
+
+	ComPtr<IDXGIDevice> DxgiDevice;
+	HRESULT Hr = State->D3DDevice.As(&DxgiDevice);
+	if (FAILED(Hr) || !DxgiDevice)
+	{
+		UE_LOG(LogUXWebviewWebView2, Error,
+			TEXT("the D3D11 device does not expose IDXGIDevice (0x%08X)"),
+			static_cast<uint32>(Hr));
+		return false;
+	}
+
+	Hr = DCompositionCreateDevice(DxgiDevice.Get(), __uuidof(IDCompositionDevice),
+		reinterpret_cast<void**>(State->CompositionDevice.GetAddressOf()));
+	if (FAILED(Hr) || !State->CompositionDevice)
+	{
+		UE_LOG(LogUXWebviewWebView2, Error,
+			TEXT("DCompositionCreateDevice failed (0x%08X)"), static_cast<uint32>(Hr));
+		return false;
+	}
+
+	Hr = State->CompositionDevice->CreateTargetForHwnd(State->HostWindow, 1,
+		&State->CompositionTarget);
+	if (FAILED(Hr) || !State->CompositionTarget)
+	{
+		UE_LOG(LogUXWebviewWebView2, Error,
+			TEXT("a composition target could not be created for the overlay window (0x%08X)"),
+			static_cast<uint32>(Hr));
+		return false;
+	}
+
+	Hr = State->CompositionDevice->CreateVisual(&State->CompositionVisual);
+	if (FAILED(Hr) || !State->CompositionVisual)
+	{
+		UE_LOG(LogUXWebviewWebView2, Error,
+			TEXT("a composition visual could not be created (0x%08X)"), static_cast<uint32>(Hr));
+		return false;
+	}
+
+	Hr = State->CompositionTarget->SetRoot(State->CompositionVisual.Get());
+	if (SUCCEEDED(Hr))
+	{
+		Hr = State->CompositionController->put_RootVisualTarget(State->CompositionVisual.Get());
+	}
+	if (FAILED(Hr))
+	{
+		UE_LOG(LogUXWebviewWebView2, Error,
+			TEXT("the browser root visual was rejected (0x%08X)"), static_cast<uint32>(Hr));
+		return false;
+	}
+	State->CompositionDevice->Commit();
+	UE_LOG(LogUXWebviewWebView2, Log,
+		TEXT("composition overlay visual bound to the host window (transparent=%d)"),
+		State->bTransparentBackground ? 1 : 0);
+
+	if (State->bTransparentBackground)
+	{
+		ComPtr<ICoreWebView2Controller2> Controller2;
+		if (SUCCEEDED(State->Controller.As(&Controller2)) && Controller2)
+		{
+			const COREWEBVIEW2_COLOR Transparent = { 0, 0, 0, 0 };
+			Controller2->put_DefaultBackgroundColor(Transparent);
+		}
+	}
+
+	const TSharedPtr<FUXWebviewWebView2State> Captured = State;
+	Hr = State->CompositionController->add_CursorChanged(
+		Microsoft::WRL::Callback<ICoreWebView2CursorChangedEventHandler>(
+			[Captured](ICoreWebView2CompositionController* Sender, IUnknown* /*Args*/) -> HRESULT
+			{
+				if (Captured->bShutdown || !Sender)
+				{
+					return S_OK;
+				}
+				HCURSOR Cursor = nullptr;
+				if (SUCCEEDED(Sender->get_Cursor(&Cursor)) && Cursor)
+				{
+					Captured->PageCursor = Cursor;
+					// WM_SETCURSOR keeps it in sync afterwards; setting it now makes
+					// hover feedback immediate while the view already owns the pointer.
+					::SetCursor(Cursor);
+				}
+				return S_OK;
+			}).Get(), &State->CursorChangedToken);
+	if (FAILED(Hr))
+	{
+		// A missing cursor handler only costs hover feedback, not the view.
+		UE_LOG(LogUXWebviewWebView2, Warning,
+			TEXT("the page cursor handler could not be registered (0x%08X)"),
+			static_cast<uint32>(Hr));
+	}
+	return true;
+}
+
+void FUXWebviewWebView2Provider::ReleaseCompositionVisual()
+{
+	if (!State.IsValid())
+	{
+		return;
+	}
+	if (State->CompositionController && State->CursorChangedToken.value != 0)
+	{
+		State->CompositionController->remove_CursorChanged(State->CursorChangedToken);
+		State->CursorChangedToken = {};
+	}
+	if (State->CompositionController)
+	{
+		State->CompositionController->put_RootVisualTarget(nullptr);
+	}
+	if (State->CompositionTarget)
+	{
+		State->CompositionTarget->SetRoot(nullptr);
+	}
+	if (State->CompositionDevice)
+	{
+		State->CompositionDevice->Commit();
+	}
+
+	State->PageCursor = nullptr;
+	State->bMouseTracking = false;
+	State->CompositionVisual.Reset();
+	State->CompositionTarget.Reset();
+	State->CompositionDevice.Reset();
+	State->D3DContext.Reset();
+	State->D3DDevice.Reset();
+	State->CompositionController.Reset();
+}
+
 FUXWebviewResult FUXWebviewWebView2Provider::StartEnvironment()
 {
 	const FString UserDataFolder = ResolveUserDataFolder();
@@ -723,6 +1132,77 @@ FUXWebviewResult FUXWebviewWebView2Provider::StartEnvironment()
 				}
 
 				Captured->Environment = Environment;
+
+				if (Captured->bCompositionHosting)
+				{
+					ComPtr<ICoreWebView2Environment3> Environment3;
+					if (SUCCEEDED(Environment->QueryInterface(IID_PPV_ARGS(&Environment3)))
+						&& Environment3)
+					{
+						const HRESULT CompositionResult =
+							Environment3->CreateCoreWebView2CompositionController(
+								Captured->HostWindow,
+								Microsoft::WRL::Callback<
+									ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
+									[Captured](HRESULT ControllerError,
+										ICoreWebView2CompositionController* CompositionController) -> HRESULT
+									{
+										if (Captured->bShutdown || !Captured->Owner)
+										{
+											return S_OK;
+										}
+										if (FAILED(ControllerError) || !CompositionController)
+										{
+											Captured->Owner->OnInitializationFailed(FString::Printf(
+												TEXT("WebView2 composition controller creation failed (0x%08X)"),
+												static_cast<uint32>(ControllerError)));
+											return S_OK;
+										}
+
+										ComPtr<ICoreWebView2Controller> Controller;
+										if (FAILED(CompositionController->QueryInterface(
+											IID_PPV_ARGS(&Controller))) || !Controller)
+										{
+											Captured->Owner->OnInitializationFailed(
+												TEXT("WebView2 composition controller is not a controller"));
+											return S_OK;
+										}
+										Captured->CompositionController = CompositionController;
+										Captured->Controller = Controller;
+										if (!Captured->Owner->SetupCompositionVisual())
+										{
+											Captured->Owner->OnInitializationFailed(
+												TEXT("WebView2 composition hosting could not build its visual tree"));
+											return S_OK;
+										}
+
+										ComPtr<ICoreWebView2> WebView;
+										if (FAILED(Controller->get_CoreWebView2(&WebView)) || !WebView)
+										{
+											Captured->Owner->OnInitializationFailed(
+												TEXT("WebView2 did not expose its core view"));
+											return S_OK;
+										}
+										Captured->WebView = WebView;
+										Captured->Owner->ConfigureWebView();
+										return S_OK;
+									}).Get());
+						if (FAILED(CompositionResult) && Captured->Owner)
+						{
+							Captured->Owner->OnInitializationFailed(FString::Printf(
+								TEXT("WebView2 composition controller request failed (0x%08X)"),
+								static_cast<uint32>(CompositionResult)));
+						}
+						return S_OK;
+					}
+
+					// Without environment3 the regular windowed controller is the only
+					// way to host the page; keep the view working and say so.
+					Captured->bCompositionHosting = false;
+					UE_LOG(LogUXWebviewWebView2, Warning,
+						TEXT("webview2 runtime has no composition controller; using a windowed overlay"));
+				}
+
 				const HRESULT ControllerResult = Environment->CreateCoreWebView2Controller(
 					Captured->HostWindow,
 					Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
@@ -953,6 +1433,7 @@ void FUXWebviewWebView2Provider::Shutdown()
 		State->WebView->remove_ProcessFailed(State->ProcessFailedToken);
 		State->WebView->remove_WebMessageReceived(State->WebMessageToken);
 	}
+	ReleaseCompositionVisual();
 	if (State->Controller)
 	{
 		State->Controller->Close();
@@ -1279,12 +1760,123 @@ FUXWebviewResult FUXWebviewWebView2Provider::SendInput(const FUXWebviewInputEven
 	{
 		return Guard;
 	}
+	if (State->bCompositionHosting)
+	{
+		// The host window owns real mouse input; this path serves callers that
+		// push events from game code.
+		return SendCompositionInput(Event);
+	}
 	if (State->bOverlayMode)
 	{
 		// The native window receives real input; forwarding would double it.
 		return FUXWebviewResult::Ok();
 	}
 	return SendWin32Input(Event);
+}
+
+FUXWebviewResult FUXWebviewWebView2Provider::SendCompositionInput(
+	const FUXWebviewInputEvent& Event)
+{
+	if (!State->CompositionController)
+	{
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotReady,
+			TEXT("webview2 composition controller is not available yet"));
+	}
+
+	// Composition controllers expose SendMouseInput and SendPointerInput only;
+	// there is no API that injects key or IME events.
+	switch (Event.Type)
+	{
+	case EUXWebviewInputType::KeyDown:
+	case EUXWebviewInputType::KeyUp:
+	case EUXWebviewInputType::Char:
+	case EUXWebviewInputType::ImeComposition:
+	case EUXWebviewInputType::ImeCommit:
+	case EUXWebviewInputType::ImeCancel:
+		return FUXWebviewResult::Fail(EUXWebviewResultCode::NotSupported,
+			TEXT("keyboard and IME input are not supported in webview2 composition overlay mode"));
+	default:
+		break;
+	}
+
+	// Event positions are CSS pixels, which equal DIPs, so they are passed
+	// through while window messages are converted from physical pixels.
+	POINT Point = { FMath::RoundToInt(Event.Position.X),
+		FMath::RoundToInt(Event.Position.Y) };
+	UINT32 VirtualKeys = 0;
+	if (Event.bShift)
+	{
+		VirtualKeys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_SHIFT;
+	}
+	if (Event.bControl)
+	{
+		VirtualKeys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_CONTROL;
+	}
+
+	COREWEBVIEW2_MOUSE_EVENT_KIND Kind = COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE;
+	UINT32 MouseData = 0;
+	switch (Event.Type)
+	{
+	case EUXWebviewInputType::MouseMove:
+		Kind = COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE;
+		VirtualKeys |= CompositionVirtualKeys(State->MouseButtons);
+		break;
+
+	case EUXWebviewInputType::MouseDown:
+	case EUXWebviewInputType::MouseUp:
+	{
+		const bool bDown = Event.Type == EUXWebviewInputType::MouseDown;
+		UINT32 ButtonKey = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_LEFT_BUTTON;
+		if (Event.Button == 1)
+		{
+			ButtonKey = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_RIGHT_BUTTON;
+			Kind = bDown ? COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN
+				: COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP;
+		}
+		else if (Event.Button == 2)
+		{
+			ButtonKey = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_MIDDLE_BUTTON;
+			Kind = bDown ? COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN
+				: COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP;
+		}
+		else
+		{
+			Kind = bDown ? COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN
+				: COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP;
+		}
+		if (bDown)
+		{
+			State->MouseButtons |= static_cast<int32>(ButtonKey);
+		}
+		else
+		{
+			State->MouseButtons &= ~static_cast<int32>(ButtonKey);
+		}
+		if (bDown)
+		{
+			VirtualKeys |= ButtonKey;
+		}
+		if (!bDown)
+		{
+			VirtualKeys |= CompositionVirtualKeys(State->MouseButtons);
+		}
+		break;
+	}
+
+	case EUXWebviewInputType::MouseWheel:
+		Kind = COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL;
+		// Positive deltas scroll up, matching both the Win32 and the SDK convention.
+		MouseData = static_cast<UINT32>(
+			FMath::RoundToInt(Event.WheelDelta * WHEEL_DELTA));
+		break;
+
+	default:
+		return FUXWebviewResult::Ok();
+	}
+
+	State->CompositionController->SendMouseInput(Kind,
+		static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(VirtualKeys), MouseData, Point);
+	return FUXWebviewResult::Ok();
 }
 
 HWND FUXWebviewWebView2Provider::EnsureInputWindow()

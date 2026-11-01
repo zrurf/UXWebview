@@ -56,11 +56,12 @@ namespace
 
 		const UUXWebviewSettings& Settings = UUXWebviewSettings::Get();
 		UE_LOG(LogUXWebview, Log,
-			TEXT("state settings: defaultProvider='%s' fallbacks=[%s] allowFallback=%d directDisplay=%d devtools=%d:%d idleShutdown=%ds autoRecover=%d bridgeOrigins=%d"),
+			TEXT("state settings: defaultProvider='%s' fallbacks=[%s] allowFallback=%d directDisplay=%d compositionOverlay=%d devtools=%d:%d idleShutdown=%ds autoRecover=%d bridgeOrigins=%d"),
 			*Settings.PlatformDefaultProvider,
 			*FString::Join(Settings.FallbackProviders, TEXT(",")),
 			Settings.bAllowProviderFallback ? 1 : 0,
 			Settings.bDirectDisplay ? 1 : 0,
+			Settings.bCompositionOverlay ? 1 : 0,
 			Settings.bEnableDevTools ? 1 : 0,
 			Settings.DevToolsPort,
 			Settings.IdleShutdownSeconds,

@@ -119,7 +119,7 @@ rejected promise reports `bSuccess = false` with the rejection message.
 | `bGpuSharedTexture` | Frames arrive as GPU shared textures without a CPU copy |
 | `bCpuPixelBuffer` | Frames are uploaded from CPU pixels |
 | `bOverlayMode` | Provider can composite through a native child window |
-| `bTransparency` | Page background can be transparent |
+| `bTransparency` | Page background can be transparent; WebView2 reports it only when `bCompositionOverlay` is enabled |
 | `bExternalBeginFrame` | The plugin paces page frames explicitly |
 | `bDevTools` | `OpenDevTools` is available |
 | `bOfflineCache` | Provider keeps a persistent page cache |
@@ -180,6 +180,10 @@ the widget rectangle every tick.
 
 Dragging needs intermediate `MouseMove` events between `MouseDown` and
 `MouseUp`; a press and release without movement is treated as a click.
+
+WebView2 composition overlay views accept mouse events only: `KeyDown`, `KeyUp`,
+`Char` and IME events fail with `NotSupported`, and `bTransparency` is the flag
+that tells game code whether the provider can show a transparent page background.
 
 ## Script bridge
 

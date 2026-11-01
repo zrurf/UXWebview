@@ -13,9 +13,10 @@ bridge with an origin allowlist, crash recovery and packaged builds.
 
 Windows also has an in-process WebView2 (Microsoft Edge) backend. It captures
 the page to a CPU texture at up to 30 fps or hosts it in a native child window;
-it needs the WebView2 Runtime, which ships with Windows 10/11 but is not bundled
-by this plugin. macOS and Linux accept the same provider interface but have no
-host yet.
+an opt-in composition overlay adds transparent page backgrounds and page cursors
+at the cost of keyboard and IME input. It needs the WebView2 Runtime, which ships
+with Windows 10/11 but is not bundled by this plugin. macOS and Linux accept the
+same provider interface but have no host yet.
 
 ## Documentation
 

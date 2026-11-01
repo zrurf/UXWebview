@@ -3,7 +3,14 @@
 ## Project settings
 
 `UUXWebviewSettings` is registered under **Project Settings > Plugins > UXWebview**
-and stored in `Config/DefaultGame.ini`.
+and stored in `Config/DefaultGame.ini`. Its section drops the `U` prefix from the
+class name, the same convention the engine uses for its own settings classes:
+
+```ini
+[/Script/UXWebview.UXWebviewSettings]
+PlatformDefaultProvider=WebView2
+bCompositionOverlay=True
+```
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -12,6 +19,7 @@ and stored in `Config/DefaultGame.ini`.
 | `bAllowProviderFallback` | `true` | When false, an unavailable explicitly requested provider fails instead of falling back |
 | `BridgeAllowedOrigins` | `[]` | Origins allowed to call game functions from the page; empty denies every origin |
 | `bDirectDisplay` | `true` | CEF texture mode binds the shared frame directly; disable to copy into a pool texture. WebView2 always uploads CPU pixels and ignores this |
+| `bCompositionOverlay` | `false` | WebView2 overlay views use `ICoreWebView2CompositionController` and DirectComposition: transparent page backgrounds and page cursors work, but the view has no keyboard or IME path. Texture mode and CEF are unaffected |
 | `bEnableDevTools` | `false` | Enables `OpenDevTools`; CEF also starts a DevTools HTTP endpoint |
 | `DevToolsPort` | `9222` | CEF DevTools port; `http://127.0.0.1:9222/json/version` answers when enabled |
 | `IdleShutdownSeconds` | `30` | CEF host exits after this many idle seconds with no live views. In-process WebView2 has no host process to reap |
@@ -57,5 +65,11 @@ capabilities and an availability reason, which is the same data that
   frame copies occur and the page runs on its own compositor; input, IME and
   clipping follow the native window rules. Overlay also runs the full frame rate
   for WebView2.
+
+With `bCompositionOverlay` enabled, WebView2 overlay views swap the browser child
+window for a DirectComposition visual. That allows transparent page backgrounds
+(`bTransparent`) and page cursors, but the view cannot receive typed text: the
+WebView2 SDK offers no key or IME injection for composition controllers. Leave
+the setting off when the page needs a keyboard.
 
 Overlay and texture views can coexist in one process.
