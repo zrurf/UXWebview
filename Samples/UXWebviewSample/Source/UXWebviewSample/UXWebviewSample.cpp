@@ -3,7 +3,20 @@
 #include "Modules/ModuleManager.h"
 #include "UUXWebview.h"
 
-IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultGameModuleImpl, UXWebviewSample, "UXWebviewSample");
+/** Starts the demo from the command line so a packaged Shipping build can be smoke-tested. */
+class FUXWebviewSampleModule : public FDefaultGameModuleImpl
+{
+public:
+	virtual void StartupModule() override
+	{
+		FDefaultGameModuleImpl::StartupModule();
+		// Console commands are stripped from Shipping, so the demo entry point
+		// has to come from the command line in a packaged run.
+		UXWebviewSampleLaunchDemoFromCommandLine();
+	}
+};
+
+IMPLEMENT_PRIMARY_GAME_MODULE(FUXWebviewSampleModule, UXWebviewSample, "UXWebviewSample");
 
 void UUXWebviewSampleBridgeHandler::SetView(UUXWebview* InView)
 {

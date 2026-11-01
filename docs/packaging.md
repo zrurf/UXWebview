@@ -64,9 +64,35 @@ root. Pointing at the root makes UAT remap the sample project itself into
 `RemappedPlugins/Samples/...`, which breaks descriptor paths
 (`Failed to open descriptor file`) in the packaged build.
 
-## Verifying
+## Verifying a packaged build
 
-Run the packaged executable with `-ExecCmds="UXWebview.DumpState"` and check the
-log for the provider list and a live view line; then open a page and confirm
-frames arrive. The provider line reports `WebView2 ... available=1` when the
-runtime is present and the loader was staged.
+Shipping builds compile out console commands and `Log`-level `UE_LOG` output, so
+the sample answers to two command-line keys instead:
+
+```
+UXWebviewSample.exe -windowed -resx=1280 -resy=720 -nosplash ^
+  -uxwv-demo="0 16 CEF http://127.0.0.1:8765/page-links-http.html 30 640 360 0 0 2" ^
+  -uxwv-clicks="160 180 8;480 180 12"
+```
+
+`-uxwv-demo` takes the `UXWebviewSample.WidgetDemo` argument list
+(`dpi seconds provider url fps width height overlay topLeft newWindow`); the
+demo only starts once the game has a viewport, and a non-zero `seconds` exits
+the game afterwards. `-uxwv-clicks` queues `x y delay` probe clicks separated
+by `;` so a smoke page can be driven without console commands.
+
+What to check:
+
+- `<Saved>/Logs/UXWebviewHost.log` reports `new window ... policy=broadcast`
+  for the `newWindow=2` argument and `download ... completed` for a page that
+  serves `Content-Disposition: attachment`.
+- The file lands in `<Saved>/UXWebview/Downloads/`.
+- The host logs `host shutting down` after the demo duration and leaves no
+  `UXWebviewHost` process behind.
+
+A packaged game resolves `<Saved>` to `%LOCALAPPDATA%/<Project>/Saved`.
+
+In the editor and in non-shipping builds the same scenes are reachable through
+`UXWebviewSample.WidgetDemo`, `UXWebviewSample.WidgetProbe` and
+`UXWebview.DumpState`, which reports the provider list and a live view line
+(`available=1` when the WebView2 runtime is present).

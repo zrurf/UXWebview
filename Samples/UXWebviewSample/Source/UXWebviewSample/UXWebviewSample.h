@@ -8,6 +8,9 @@
 
 class UUXWebview;
 
+/** Starts the demo scenes from -uxwv-demo / -uxwv-clicks; see WidgetDemo.cpp. */
+void UXWebviewSampleLaunchDemoFromCommandLine();
+
 /** Demo-only page bridge handler: replies with the payload it received. */
 UCLASS()
 class UUXWebviewSampleBridgeHandler : public UObject

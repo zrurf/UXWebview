@@ -51,7 +51,9 @@ if (-not (Test-Path $outputDir))
 
 if (-not $StageDir)
 {
-	$StageDir = Join-Path $repoRoot 'Binaries/ThirdParty/UXWebviewHost/Win64'
+	# UXWebviewCEF.Build.cs reads this folder to fill its RuntimeDependencies, so
+	# the host has to be staged inside the plugin rather than next to the repo.
+	$StageDir = Join-Path $repoRoot 'Plugins/UXWebview/Binaries/ThirdParty/UXWebviewHost/Win64'
 }
 New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
 

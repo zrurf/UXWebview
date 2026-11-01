@@ -9,6 +9,8 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformMisc.h"
 #include "Misc/FileHelper.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
 #include "UUXWebview.h"
@@ -208,10 +210,10 @@ void StartWidgetDemo(const TArray<FString>& Args, UWorld* World)
 	const FString UrlDisplay = Url.IsEmpty() ? FString(TEXT("(default)")) : Url;
 	const FString SizeDisplay = bFill ? FString(TEXT("fill")) : FString::Printf(TEXT("%dx%d"), Width, Height);
 	UE_LOG(LogUXWebviewWidgetDemo, Log,
-		TEXT("widget demo started: provider=%s url=%s size=%s dpi=%.2f (0=auto) viewport=%dx%d fps=%d mode=%s; click inside to send input"),
+		TEXT("widget demo started: provider=%s url=%s size=%s dpi=%.2f (0=auto) viewport=%dx%d fps=%d mode=%s newWindow=%d; click inside to send input"),
 		*Provider, *UrlDisplay, *SizeDisplay, Dpi,
 		Params.ViewportSize.X, Params.ViewportSize.Y, FrameRate,
-		bOverlay ? TEXT("overlay") : TEXT("texture"));
+		bOverlay ? TEXT("overlay") : TEXT("texture"), NewWindowArg);
 
 	if (Seconds > 0.0f)
 	{
@@ -776,3 +778,59 @@ FAutoConsoleCommandWithWorldAndArgs GWidgetDemoStopCommand(
 	TEXT("Stops the UMG widget demo"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&StopWidgetDemoCommand));
 } // namespace
+
+void UXWebviewSampleLaunchDemoFromCommandLine()
+{
+	FString DemoArgs;
+	const bool bHasDemo = FParse::Value(FCommandLine::Get(), TEXT("UXWV-DEMO="), DemoArgs);
+	FString ClickArgs;
+	const bool bHasClicks = FParse::Value(FCommandLine::Get(), TEXT("UXWV-CLICKS="), ClickArgs);
+	if (!bHasDemo && !bHasClicks)
+	{
+		return;
+	}
+
+	TArray<FString> Demo;
+	if (bHasDemo)
+	{
+		DemoArgs.ParseIntoArrayWS(Demo);
+	}
+
+	TArray<FString> ClickSpecs;
+	if (bHasClicks)
+	{
+		ClickArgs.ParseIntoArray(ClickSpecs, TEXT(";"), true);
+	}
+
+	// The module starts before the default map has a game instance, so poll
+	// instead of assuming the viewport is ready.
+	TSharedPtr<float> Elapsed = MakeShared<float>(0.0f);
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+		[Demo, ClickSpecs, Elapsed](float DeltaSeconds) -> bool
+		{
+			*Elapsed += DeltaSeconds;
+			UGameInstance* GameInstance = GEngine && GEngine->GameViewport
+				? GEngine->GameViewport->GetGameInstance()
+				: nullptr;
+			UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
+			if (!World || !GameInstance->GetGameViewportClient())
+			{
+				return *Elapsed < 20.0f;
+			}
+
+			if (Demo.Num() > 0)
+			{
+				StartWidgetDemo(Demo, World);
+			}
+
+			// Clicks reuse the WidgetProbe path, so a packaged run can drive the
+			// page without console commands.
+			for (const FString& Spec : ClickSpecs)
+			{
+				TArray<FString> ClickArgsList;
+				Spec.ParseIntoArrayWS(ClickArgsList);
+				ProbeClickCommand(ClickArgsList, World);
+			}
+			return false;
+		}));
+}

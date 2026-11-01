@@ -318,10 +318,11 @@ FUXWebviewResult FUXWebviewCEFProvider::Initialize(
 		FTickerDelegate::CreateRaw(this, &FUXWebviewCEFProvider::Tick));
 
 	UE_LOG(LogUXWebviewCEFProvider, Log,
-		TEXT("cef view %u created: %s %dx%d scale=%.2f fps=%d url='%s'"),
+		TEXT("cef view %u created: %s %dx%d scale=%.2f fps=%d url='%s' newWindow=%s"),
 		InstanceId, bOverlayMode ? TEXT("overlay")
 			: (bDirectDisplay ? TEXT("direct") : TEXT("texture")),
-		ViewSize.X, ViewSize.Y, Spec.DpiScale, Spec.FrameRate, *Spec.Url);
+		ViewSize.X, ViewSize.Y, Spec.DpiScale, Spec.FrameRate, *Spec.Url,
+		*Spec.NewWindowPolicy);
 	return FUXWebviewResult::Ok();
 }
 
