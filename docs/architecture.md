@@ -112,6 +112,21 @@ lives in a host window positioned off-screen (see "Input and IME" for why it
 stays shown). Overlay mode bypasses this path entirely: the page is a native
 child window and Chromium composites it.
 
+**Page CSS space.** Page CSS pixels are widget-local pixels on every backend:
+the widget requests `ViewportSize = local * DpiScale` and maps input as
+`CSS = Local / WidgetScale * Viewport / DpiScale`. Texture CEF browsers receive
+that scale through `GetScreenInfo`, which only applies to windowless views. A
+windowed overlay browser lays out at the monitor DPI instead, so the host zooms
+the page with `SetZoomLevel` to `DeviceScale / monitorScale` and reasserts the
+zoom on creation, on every main-frame load start, and whenever the bounds change.
+An overlay page therefore reports the same `innerWidth`, `innerHeight` and
+`devicePixelRatio` as a texture view of the same size. Chromium's mouse API takes
+view DIPs while the plugin sends CSS pixels, so the host converts synthetic mouse
+positions back with `DIP = CSS * pageZoom`; a texture view zooms at 1 and is
+unaffected. Chromium keys zoom by origin, so an overlay and a texture view of the
+same origin cannot hold different zooms at the same time: the texture view
+re-announces 1.0 on each load, and the overlay re-applies its own zoom.
+
 **WebView2 composition overlay.** When `bCompositionOverlay` is enabled, overlay
 views are created through `ICoreWebView2Environment3::CreateCoreWebView2CompositionController`.
 The provider owns a D3D11 device, creates a DirectComposition target for the host

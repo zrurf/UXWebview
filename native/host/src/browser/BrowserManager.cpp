@@ -1,5 +1,7 @@
 #include "browser/BrowserManager.h"
 
+#include <cmath>
+
 #include "cef_frame.h"
 #include "cef_parser.h"
 #include "cef_task.h"
@@ -100,6 +102,25 @@ CefRect OverlayScreenRect(CefWindowHandle parent, int x, int y, int width, int h
 }
 
 /**
+ * Windowed browsers lay out at the monitor DPI, unlike windowless ones where
+ * GetScreenInfo sets it. Zooming the page brings a windowed overlay back to the
+ * scale the widget asked for, so its CSS pixels match a texture view of the same
+ * size: CSS = physical / deviceScale, and the page gets the same DPI.
+ */
+float PageZoomFor(float deviceScale, HWND window)
+{
+	const float requested = deviceScale > 0.0f ? deviceScale : 1.0f;
+	const float osScale = window && ::IsWindow(window)
+		? static_cast<float>(::GetDpiForWindow(window)) / 96.0f
+		: 1.0f;
+	if (osScale <= 0.0f)
+	{
+		return 1.0f;
+	}
+	return requested / osScale;
+}
+
+/**
  * CEF always turns the browser window into a child of the handle it is given,
  * so the overlay uses a host-owned carrier popup instead of the game window:
  * the game's flip-model swap chain hides child HWNDs (airspace), a plain popup
@@ -180,6 +201,7 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 	instance->PosY = posY;
 	instance->Width = width;
 	instance->Height = height;
+	instance->DeviceScale = deviceScale > 0.0f ? deviceScale : 1.0f;
 
 	if (overlay)
 	{
@@ -230,6 +252,9 @@ bool BrowserManager::Create(uint32_t id, const std::string& sharedMemoryName, in
 		const CefWindowHandle carrier =
 			reinterpret_cast<CefWindowHandle>(static_cast<uintptr_t>(raw->CarrierHandle));
 		windowInfo.SetAsChild(carrier, CefRect(0, 0, width, height));
+		// The window lays out at the monitor DPI, so the page is zoomed to the
+		// widget's scale before it is created.
+		ApplyOverlayPageZoom(*raw);
 	}
 	else
 	{
@@ -377,6 +402,7 @@ void BrowserManager::SetBounds(uint32_t id, int x, int y, int width, int height,
 	Instance* instance = it->second.get();
 	instance->PosX = x;
 	instance->PosY = y;
+	instance->DeviceScale = deviceScale > 0.0f ? deviceScale : 1.0f;
 	instance->Client->SetViewSize(width, height, deviceScale);
 	if (!instance->bOverlay || !instance->Browser)
 	{
@@ -384,6 +410,9 @@ void BrowserManager::SetBounds(uint32_t id, int x, int y, int width, int height,
 	}
 
 	MoveOverlayWindow(*instance, x, y, width, height);
+	// Resizing or moving across monitors can change the page scale Chromium would
+	// otherwise keep from the monitor's DPI.
+	ApplyOverlayPageZoom(*instance);
 	UXWV_LOG_INFO("instance %u: overlay bounds %d,%d %dx%d at scale %.3f",
 		id, x, y, width, height, deviceScale);
 }
@@ -418,6 +447,17 @@ void BrowserManager::MoveOverlayWindow(Instance& instance, int x, int y, int wid
 			SWP_NOZORDER | SWP_NOACTIVATE);
 		instance.Browser->GetHost()->NotifyMoveOrResizeStarted();
 	}
+}
+
+void BrowserManager::ApplyOverlayPageZoom(Instance& instance)
+{
+	if (!instance.Client || !instance.bOverlay)
+	{
+		return;
+	}
+
+	HWND carrier = reinterpret_cast<HWND>(static_cast<uintptr_t>(instance.CarrierHandle));
+	instance.Client->SetPageZoom(PageZoomFor(instance.DeviceScale, carrier));
 }
 
 void BrowserManager::SetVisible(uint32_t id, bool visible)
@@ -510,8 +550,13 @@ void BrowserManager::SendInput(uint32_t id, const UxInputEvent& event, const std
 
 	CefRefPtr<CefBrowserHost> host = it->second->Browser->GetHost();
 	CefMouseEvent mouse;
-	mouse.x = static_cast<int>(event.X);
-	mouse.y = static_cast<int>(event.Y);
+	// The plugin sends view CSS pixels, while Chromium's mouse API takes view DIPs
+	// and lays the page out at DIP * page zoom. An overlay page is zoomed to reach
+	// the widget scale, so CSS is converted back to DIP here; a texture page
+	// zooming at 1 leaves the coordinates untouched.
+	const float pageZoom = it->second->Client->GetPageZoom();
+	mouse.x = static_cast<int>(std::lround(event.X * pageZoom));
+	mouse.y = static_cast<int>(std::lround(event.Y * pageZoom));
 	mouse.modifiers = ToCefModifiers(event.Modifiers)
 		// Held buttons must ride along on move events, otherwise Chromium
 		// treats a drag as hover and text selection never starts.

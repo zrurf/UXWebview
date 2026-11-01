@@ -64,7 +64,10 @@ capabilities and an availability reason, which is the same data that
 - **Overlay** creates a native browser child window inside the game window. No
   frame copies occur and the page runs on its own compositor; input, IME and
   clipping follow the native window rules. Overlay also runs the full frame rate
-  for WebView2.
+  for WebView2. The page keeps the same CSS space as a texture view of the same
+  size (`DpiScale` is CSS-to-pixel on both), because a CEF overlay browser is
+  zoomed to `DpiScale / monitor DPI` to compensate for the window laying out at
+  the monitor scale.
 
 With `bCompositionOverlay` enabled, WebView2 overlay views swap the browser child
 window for a DirectComposition visual. That allows transparent page backgrounds

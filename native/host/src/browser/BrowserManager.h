@@ -80,6 +80,8 @@ private:
 		/** Overlay size in physical pixels. */
 		int Width = 0;
 		int Height = 0;
+		/** CSS-to-pixel scale the widget asked for; drives the overlay page zoom. */
+		float DeviceScale = 1.0f;
 		/** Mouse buttons currently held, as CEF EVENTFLAG_* bits (drag selection). */
 		uint32_t PressedButtons = 0;
 	};
@@ -87,6 +89,8 @@ private:
 	void OnBrowserCreated(uint32_t id, CefRefPtr<CefBrowser> browser);
 	void OnBrowserClosed(uint32_t id);
 	void MoveOverlayWindow(Instance& instance, int x, int y, int width, int height);
+	/** Keeps the overlay page zoom in step with the widget's device scale. */
+	void ApplyOverlayPageZoom(Instance& instance);
 	void Emit(uint32_t instanceId, uint32_t type, const std::string& json) const;
 
 	uint64_t AdapterLuid = 0;

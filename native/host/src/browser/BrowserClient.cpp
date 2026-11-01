@@ -454,6 +454,7 @@ void BrowserClient::OnAfterCreated(CefRefPtr<CefBrowser> browser)
 {
 	Browser = browser;
 	UXWV_LOG_INFO("instance %u: browser created (%dx%d)", InstanceId, Width, Height);
+	ApplyPageZoom();
 	if (OnCreated)
 	{
 		OnCreated(InstanceId, browser);
@@ -520,6 +521,7 @@ void BrowserClient::OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFram
 	{
 		return;
 	}
+	ApplyPageZoom();
 	Emit(UXWV_IPC_EVENT_LOAD_START, MakeStringJson("url", frame->GetURL().ToString()));
 }
 
@@ -595,6 +597,38 @@ void BrowserClient::OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
 		+ " " + errorString.ToString();
 	UXWV_LOG_ERROR("instance %u: %s", InstanceId, reason.c_str());
 	Emit(UXWV_IPC_EVENT_CRASH, MakeStringJson("reason", reason));
+}
+
+void BrowserClient::SetPageZoom(float zoomFactor)
+{
+	const float clamped = zoomFactor > 0.0f ? zoomFactor : 1.0f;
+	if (std::abs(clamped - PageZoom) < 0.001f)
+	{
+		return;
+	}
+	PageZoom = clamped;
+	ApplyPageZoom();
+}
+
+void BrowserClient::ApplyPageZoom()
+{
+	if (!Browser)
+	{
+		return;
+	}
+
+	// Chromium stores zoom as a level where 1.2^level is the factor, so one
+	// SetZoomLevel call moves the layout width by that factor.
+	const double level = std::abs(PageZoom - 1.0f) < 0.001f
+		? 0.0
+		: std::log(static_cast<double>(PageZoom)) / std::log(1.2);
+	Browser->GetHost()->SetZoomLevel(level);
+	if (std::abs(level - AppliedZoomLevel) > 0.0001)
+	{
+		AppliedZoomLevel = level;
+		UXWV_LOG_INFO("instance %u: page zoom %.3f (level %.3f)",
+			InstanceId, PageZoom, level);
+	}
 }
 
 void BrowserClient::SetViewSize(int width, int height, float deviceScale)

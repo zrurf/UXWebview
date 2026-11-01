@@ -96,6 +96,13 @@ public:
 
 	/** Size is in device pixels; CEF lays out at Size/DeviceScale device-independent pixels. */
 	void SetViewSize(int width, int height, float deviceScale);
+	/**
+	 * Page zoom that this browser must keep. Windowed browsers lay out at the
+	 * monitor DPI, so an overlay browser zooms the page to reach the scale the
+	 * widget asked for, which keeps its CSS pixels the same size as a texture view.
+	 */
+	void SetPageZoom(float zoomFactor);
+	float GetPageZoom() const { return PageZoom; }
 	int GetWidth() const { return Width; }
 	int GetHeight() const { return Height; }
 	float GetDeviceScale() const { return DeviceScale; }
@@ -113,6 +120,7 @@ public:
 private:
 	void Emit(uint32_t eventType, const std::string& json);
 	void UpdateDipSize();
+	void ApplyPageZoom();
 
 	uint32_t InstanceId;
 	FramePublisher* Publisher = nullptr;
@@ -124,6 +132,10 @@ private:
 	int Width;
 	int Height;
 	float DeviceScale = 1.0f;
+	/** Requested page zoom; applied once the browser exists and reasserted on load. */
+	float PageZoom = 1.0f;
+	/** Last zoom level handed to Chromium, so repeated loads stay quiet. */
+	double AppliedZoomLevel = 0.0;
 	// View size CEF reports through GetViewRect, in device-independent pixels.
 	int DipWidth = 0;
 	int DipHeight = 0;
